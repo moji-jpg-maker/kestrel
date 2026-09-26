@@ -33,7 +33,7 @@
     "@hono/node-server": "^2.1.1",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
-    "argon2": "^0.44.0",
+    "argon2": "^0.45.1",
     "dotenv": "^17.4.2",
     "hono": "^4.13.8",
     "jose": "^5.10.0",
