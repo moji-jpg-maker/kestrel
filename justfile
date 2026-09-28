@@ -6,8 +6,8 @@ adb := android_sdk + "/platform-tools/adb"
 gradle := 'ANDROID_HOME="' + android_sdk + '" JAVA_HOME="' + java_home + '" PATH="' + java_home + '/bin:$PATH" ./gradlew'
 dev_compose := "docker compose -f compose.dev.yaml"
 webtest_compose := "docker compose -p kestrel-webtest -f compose.dev.yaml"
-package := "dev.narumi.kestrel"
-activity := package + "/.MainActivity"
+package := "dev.narumi.kestrel.fork"
+activity := package + "/dev.narumi.kestrel.MainActivity"
 apk := "app/build/outputs/apk/debug/app-debug.apk"
 
 # show available recipes without changing local or device state

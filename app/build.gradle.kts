@@ -48,6 +48,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".fork"
+        }
         release {
             signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = false
