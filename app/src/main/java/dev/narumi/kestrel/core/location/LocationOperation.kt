@@ -3,6 +3,7 @@ package dev.narumi.kestrel.core.location
 enum class LocationOperationAction {
     SetPoint,
     StartRoute,
+    StartScheduled,
     UpdateRouteSettings,
     Pause,
     Resume,
@@ -62,4 +63,16 @@ internal fun mockOperationErrorMessage(
             } else {
                 "Kestrel could not apply the mock location. No mock was started; try again."
             }
+    }
+
+internal fun String?.toLocationOperationAction(): LocationOperationAction? =
+    when (this) {
+        LocationService.ACTION_SET_LOCATION -> LocationOperationAction.SetPoint
+        LocationService.ACTION_START_ROUTE -> LocationOperationAction.StartRoute
+        LocationService.ACTION_START_SCHEDULED -> LocationOperationAction.StartScheduled
+        LocationService.ACTION_UPDATE_ROUTE_SETTINGS -> LocationOperationAction.UpdateRouteSettings
+        LocationService.ACTION_PAUSE -> LocationOperationAction.Pause
+        LocationService.ACTION_RESUME -> LocationOperationAction.Resume
+        LocationService.ACTION_STOP -> LocationOperationAction.Stop
+        else -> null
     }

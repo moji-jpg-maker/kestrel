@@ -38,6 +38,19 @@ data class RouteState(
     val progressMeters: Double = 0.0,
     // PingPong direction at the time of the last write. Ignored by Once / Loop modes on restore.
     val forward: Boolean = true,
+    // Scheduled playback. A non-null startAtEpochMs marks this state as a scheduled plan; all of
+    // these default to null so older payloads decode as ordinary routes.
+    val timesMs: LongArray? = null,
+    val startAtEpochMs: Long? = null,
+    val updateIntervalMs: Long? = null,
+    val sourceLat: Double? = null,
+    val sourceLng: Double? = null,
+    // "Constant" (uses speedKmh), "Timestamps" or "TimestampsScaled" (uses speedFactor).
+    val speedSource: String? = null,
+    val speedFactor: Double? = null,
+    val leadInSpeedKmh: Double? = null,
+    val pausedTotalMs: Long? = null,
+    val name: String? = null,
 )
 
 @Serializable

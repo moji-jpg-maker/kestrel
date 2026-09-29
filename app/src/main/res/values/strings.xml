@@ -7,6 +7,7 @@
     <string name="location_service_text_single">Holding a single mock location</string>
     <string name="location_service_text_route_paused">Mock route paused</string>
     <string name="location_service_text_route_playing">Playing a mock route</string>
+    <string name="location_service_text_scheduled_armed">Waiting for the scheduled start</string>
     <string name="location_service_action_pause">Pause</string>
     <string name="location_service_action_resume">Resume</string>
     <string name="location_service_action_stop">Stop</string>

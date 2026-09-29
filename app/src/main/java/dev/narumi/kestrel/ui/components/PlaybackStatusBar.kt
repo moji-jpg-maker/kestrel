@@ -41,6 +41,22 @@ internal fun playbackBarPresentation(runtime: RuntimeState): PlaybackBarPresenta
                 details = "%.5f, %.5f".format(runtime.point.lat, runtime.point.lng),
                 primaryAction = null,
             )
+        is RuntimeState.Scheduled ->
+            PlaybackBarPresentation(
+                title =
+                    when {
+                        runtime.phase == dev.narumi.kestrel.core.location.SchedulePhase.Armed -> "Route scheduled"
+                        runtime.paused -> "Route paused"
+                        else -> "Route playing"
+                    },
+                details = "${runtime.plan.points.size} waypoints · ${runtime.speedKmh.toBarSpeed()}",
+                primaryAction =
+                    when {
+                        runtime.phase == dev.narumi.kestrel.core.location.SchedulePhase.Armed -> null
+                        runtime.paused -> PlaybackBarAction.Resume
+                        else -> PlaybackBarAction.Pause
+                    },
+            )
         is RuntimeState.Route ->
             PlaybackBarPresentation(
                 title = if (runtime.paused) "Route paused" else "Route playing",

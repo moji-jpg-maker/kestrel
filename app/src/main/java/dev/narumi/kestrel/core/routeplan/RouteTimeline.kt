@@ -46,6 +46,9 @@ class RouteTimeline(
     val durationSeconds: Double = ends.lastOrNull() ?: 0.0
     val totalMeters: Double = legs.sumOf { it.meters }
 
+    /** Overall average including any stationary periods; 0 for a zero-length route. */
+    val averageSpeedKmh: Double = if (durationSeconds > 0.0) totalMeters / durationSeconds / KMH_TO_MPS else 0.0
+
     fun positionAt(elapsedSeconds: Double): MockSample {
         if (legs.isEmpty()) return MockSample(startPoint, 0.0, 0.0)
         // `!(x > 0)` also catches NaN.

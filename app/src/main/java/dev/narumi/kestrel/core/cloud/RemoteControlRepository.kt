@@ -404,6 +404,7 @@ internal fun RuntimeState.toRemotePlaybackState(): RemotePlaybackState =
     when (this) {
         RuntimeState.Idle -> RemotePlaybackState.IDLE
         is RuntimeState.Single -> RemotePlaybackState.SINGLE
+        is RuntimeState.Scheduled -> if (paused) RemotePlaybackState.PAUSED else RemotePlaybackState.ROUTE
         is RuntimeState.Route ->
             if (paused) {
                 RemotePlaybackState.PAUSED

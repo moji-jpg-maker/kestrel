@@ -20,6 +20,8 @@ interface TimeSource {
  * service was killed, construct a new clock from the persisted [startAtEpochMs] and
  * [pausedTotalMs]; a pause that was still open when the process died is not recoverable and
  * counts as running.
+ *
+ * Thread-safe: the service thread pauses and resumes while the playback coroutine reads.
  */
 class PlaybackClock(
     private val time: TimeSource,
@@ -30,25 +32,31 @@ class PlaybackClock(
     private var pausedTotalMs: Long = pausedTotalMs
     private var pausedAtElapsedMs: Long? = null
 
+    @get:Synchronized
     val isPaused: Boolean get() = pausedAtElapsedMs != null
 
+    @Synchronized
     fun pausedTotalMs(): Long = pausedTotalMs + openPauseMs()
 
+    @Synchronized
     fun elapsedSeconds(): Double {
         val now = pausedAtElapsedMs ?: time.elapsedRealtimeMs()
         return (now - anchorElapsedMs - pausedTotalMs) / MS_PER_SECOND
     }
 
     /** Milliseconds until the start; 0 once it has passed. */
+    @Synchronized
     fun msUntilStart(): Long = (-(time.elapsedRealtimeMs() - anchorElapsedMs)).coerceAtLeast(0L)
 
     /** Pauses playback. Returns false (and does nothing) before the start or if already paused. */
+    @Synchronized
     fun pause(): Boolean {
         if (isPaused || elapsedSeconds() < 0.0) return false
         pausedAtElapsedMs = time.elapsedRealtimeMs()
         return true
     }
 
+    @Synchronized
     fun resume() {
         if (!isPaused) return
         pausedTotalMs += openPauseMs()

@@ -1,7 +1,10 @@
 package dev.narumi.kestrel.core.data
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -29,6 +32,9 @@ class RouteStateSerializationTest {
 
         assertEquals(30.0, decoded.speedKmh, 1e-9)
         assertEquals("Loop", decoded.mode)
+        assertNull(decoded.startAtEpochMs)
+        assertNull(decoded.timesMs)
+        assertNull(decoded.speedSource)
         assertEquals(
             "legacy payloads must resume from the start, not a random offset",
             0.0,
@@ -38,6 +44,40 @@ class RouteStateSerializationTest {
         assertTrue(
             "legacy payloads must resume in the natural forward direction",
             decoded.forward,
+        )
+    }
+
+    @Test
+    fun scheduledFieldsRoundTripWhileRetainingUnknownFields() {
+        val previous = """{
+          "mode":"Route","futureMock":true,"route":{
+            "lats":[0.0,0.001],"lngs":[0.0,0.001],"speedKmh":30.0,
+            "startAtEpochMs":1700000000000,"updateIntervalMs":500,
+            "timesMs":[0,1000],"speedSource":"TimestampsScaled","speedFactor":2.0,
+            "sourceLat":0.0,"sourceLng":-0.001,"leadInSpeedKmh":20.0,
+            "pausedTotalMs":1000,"name":"Commute","futureRoute":"keep"
+          }
+        }"""
+        val state = json.decodeFromString(MockState.serializer(), previous)
+        val updated = state.copy(route = requireNotNull(state.route).copy(pausedTotalMs = 2_000L))
+        val encoded = json.encodePreservingUnknown(MockState.serializer(), updated, previous)
+        val restored = requireNotNull(json.decodeFromString(MockState.serializer(), encoded).route)
+
+        assertEquals(1_700_000_000_000L, restored.startAtEpochMs)
+        assertEquals(listOf(0L, 1_000L), restored.timesMs!!.toList())
+        assertEquals(500L, restored.updateIntervalMs)
+        assertEquals(2.0, restored.speedFactor)
+        assertEquals(2_000L, restored.pausedTotalMs)
+        assertEquals("Commute", restored.name)
+        val root = json.parseToJsonElement(encoded).jsonObject
+        assertEquals("true", root.getValue("futureMock").jsonPrimitive.content)
+        assertEquals(
+            "keep",
+            root
+                .getValue("route")
+                .jsonObject
+                .getValue("futureRoute")
+                .jsonPrimitive.content,
         )
     }
 

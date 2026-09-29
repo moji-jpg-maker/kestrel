@@ -3,7 +3,6 @@ package dev.narumi.kestrel.core.location
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -11,15 +10,14 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import androidx.core.app.NotificationCompat
 import androidx.core.content.getSystemService
-import dev.narumi.kestrel.MainActivity
 import dev.narumi.kestrel.R
 import dev.narumi.kestrel.core.cloud.RemoteControlPoller
 import dev.narumi.kestrel.core.data.KestrelPrefs
 import dev.narumi.kestrel.core.data.MockState
 import dev.narumi.kestrel.core.data.RouteState
-import dev.narumi.kestrel.core.data.SinglePointState
+import dev.narumi.kestrel.core.routeplan.LocationSink
+import dev.narumi.kestrel.core.routeplan.PlaybackPlan
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,7 +35,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import java.util.UUID
 
 class LocationService : Service() {
     private lateinit var mockProvider: MockProviderManager
@@ -49,16 +46,21 @@ class LocationService : Service() {
     private val providerWriteLock = Any()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var routeJob: Job? = null
-    private var singleKeepAliveJob: Job? = null
+    private val singleKeepAlive by lazy { SinglePointKeepAlive(scope, ::pushLocation) }
     private var restoreJob: Job? = null
 
     @Volatile private var paused = false
     private var currentMode: MockState.Mode = MockState.Mode.Idle
     private var stateInitialized = false
+    private var latestStartId = 0
 
     // Publish the active engine and serialized route fields together so progress writers cannot
     // combine state from two routes during replacement.
     @Volatile private var activeRoute: ActiveRouteSnapshot? = null
+
+    // Set instead of activeRoute while a scheduled plan is armed or playing. Also read by the
+    // notification builder, hence volatile.
+    @Volatile private var activeScheduled: ActiveScheduled? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -75,6 +77,7 @@ class LocationService : Service() {
         startId: Int,
     ): Int =
         runCatching {
+            latestStartId = startId
             if (intent?.action != null) {
                 restoreJob?.cancel()
                 restoreJob = null
@@ -84,6 +87,7 @@ class LocationService : Service() {
                 ACTION_STOP -> stopAction(intent, startId)
                 ACTION_SET_LOCATION -> setLocationAction(intent)
                 ACTION_START_ROUTE -> startRouteAction(intent)
+                ACTION_START_SCHEDULED -> startScheduledAction(intent)
                 ACTION_UPDATE_ROUTE_SETTINGS -> updateRouteSettingsAction(intent)
                 ACTION_PAUSE -> pauseAction(intent)
                 ACTION_RESUME -> resumeAction(intent)
@@ -218,6 +222,113 @@ class LocationService : Service() {
         return START_STICKY
     }
 
+    private fun startScheduledAction(intent: Intent): Int {
+        val plan =
+            ScheduledPlanHandoff.take(intent.getStringExtra(EXTRA_PLAN_TOKEN))
+                ?: throw IllegalArgumentException("The schedule did not reach the service. Try again.")
+        if (!tryEnsureForeground()) {
+            completeOperation(
+                intent,
+                succeeded = false,
+                message = "Kestrel could not start its location service. Check notification permission and try again.",
+            )
+            return if (_runtimeState.value == RuntimeState.Idle) START_NOT_STICKY else START_STICKY
+        }
+        val active = newActiveScheduled(plan, intent.getStringExtra(EXTRA_REQUEST_ID), pausedTotalMs = 0L)
+
+        // Fail now rather than at the start time, possibly hours later, if mock location is not allowed.
+        if (!mockProvider.isMockAllowed()) {
+            throw MockNotAllowedException("Kestrel is not selected as the mock location app in Developer options")
+        }
+        // Prove that the provider accepts the source point before cancelling any running mock.
+        synchronized(providerWriteLock) {
+            plan.source?.let { source ->
+                ensureMockStarted()
+                mockProvider.setLocation(source)
+                _currentMock.value = source
+            }
+            activateScheduled(active)
+            currentMode = MockState.Mode.Route
+            _runtimeState.value = active.toRuntimeState(paused = false)
+            stateInitialized = true
+        }
+        setRemoteControlServiceLease(true)
+        refreshNotification()
+        scope.launch { stateWriter.persist() }
+        completeOperation(intent, succeeded = true, message = "Route scheduled.")
+        return START_STICKY
+    }
+
+    private fun newActiveScheduled(
+        plan: PlaybackPlan,
+        requestId: String?,
+        pausedTotalMs: Long,
+    ): ActiveScheduled = ActiveScheduled.create(plan, requestId, pausedTotalMs)
+
+    // Called under providerWriteLock.
+    private fun activateScheduled(active: ActiveScheduled) {
+        stopRoute()
+        stopSingleKeepAlive()
+        // With no source point the real location stays in charge until the start time.
+        if (active.plan.source == null) {
+            stopMock()
+            _currentMock.value = null
+        }
+        paused = false
+        activeScheduled = active
+        routeJob = scope.launch { active.runner(scheduledSink(active), scheduledListener(active)).run() }
+    }
+
+    private fun scheduledSink(active: ActiveScheduled) =
+        LocationSink { sample ->
+            synchronized(providerWriteLock) {
+                if (activeScheduled !== active) return@LocationSink
+                ensureMockStarted()
+                mockProvider.setLocation(
+                    point = sample.point,
+                    speed = sample.speedMps.toFloat(),
+                    bearing = sample.bearingDeg.toFloat(),
+                )
+                _currentMock.value = sample.point
+            }
+        }
+
+    private fun scheduledListener(active: ActiveScheduled) =
+        ScheduledPlaybackCallbacks(
+            lock = providerWriteLock,
+            isCurrent = { activeScheduled === active },
+            moving = {
+                active.phase = SchedulePhase.Moving
+                _runtimeState.value = active.toRuntimeState(paused = paused)
+                refreshNotification()
+            },
+            arrived = { destination ->
+                finishRoute(destination)
+                scope.launch { stateWriter.persist() }
+            },
+            failed = { error -> scope.launch(Dispatchers.Main.immediate) { failScheduled(active, error) } },
+        )
+
+    private fun failScheduled(
+        active: ActiveScheduled,
+        error: Exception,
+    ) {
+        synchronized(providerWriteLock) {
+            if (activeScheduled !== active) return
+            Log.w(TAG, "Scheduled playback failed: ${error.javaClass.simpleName}")
+            stopRoute()
+            stopSingleKeepAlive()
+            stopMock()
+            currentMode = MockState.Mode.Idle
+            _currentMock.value = null
+            _runtimeState.value = RuntimeState.Idle
+        }
+        setRemoteControlServiceLease(false)
+        active.failureResult(error)?.let { _operationResults.tryEmit(it) }
+        scope.launch { stateWriter.persist() }
+        if (stopSelfResult(latestStartId)) stopForegroundCompat()
+    }
+
     private fun updateRouteSettingsAction(intent: Intent): Int {
         val expectedPlaybackId = intent.getStringExtra(EXTRA_PLAYBACK_ID)
         require(!expectedPlaybackId.isNullOrBlank()) { "The route has changed. Adjust the current route instead." }
@@ -253,9 +364,18 @@ class LocationService : Service() {
 
     private fun pauseAction(intent: Intent): Int {
         synchronized(providerWriteLock) {
-            check(_runtimeState.value is RuntimeState.Route) { "No route is playing." }
-            paused = true
-            updateRouteRuntimePaused(paused = true)
+            val scheduled = activeScheduled
+            if (scheduled != null) {
+                check(scheduled.phase == SchedulePhase.Moving && scheduled.clock.pause()) {
+                    "The route cannot be paused right now. Stop to cancel a route that has not started."
+                }
+                paused = true
+                updateScheduledRuntimePaused(paused = true)
+            } else {
+                check(_runtimeState.value is RuntimeState.Route) { "No route is playing." }
+                paused = true
+                updateRouteRuntimePaused(paused = true)
+            }
         }
         refreshNotification()
         scope.launch { stateWriter.persist() }
@@ -265,9 +385,17 @@ class LocationService : Service() {
 
     private fun resumeAction(intent: Intent): Int {
         synchronized(providerWriteLock) {
-            check(_runtimeState.value is RuntimeState.Route) { "No paused route is available." }
-            paused = false
-            updateRouteRuntimePaused(paused = false)
+            val scheduled = activeScheduled
+            if (scheduled != null) {
+                check(scheduled.clock.isPaused) { "No paused route is available." }
+                scheduled.clock.resume()
+                paused = false
+                updateScheduledRuntimePaused(paused = false)
+            } else {
+                check(_runtimeState.value is RuntimeState.Route) { "No paused route is available." }
+                paused = false
+                updateRouteRuntimePaused(paused = false)
+            }
         }
         refreshNotification()
         scope.launch { stateWriter.persist() }
@@ -321,7 +449,22 @@ class LocationService : Service() {
         }
     }
 
+    private fun restoreScheduled(route: RouteState): Boolean {
+        val active = ActiveScheduled.restore(route) ?: return false
+        synchronized(providerWriteLock) {
+            activateScheduled(active)
+            currentMode = MockState.Mode.Route
+            // Progress is recomputed from the start time; a restored plan gets a fresh playback ID.
+            _runtimeState.value = active.toRuntimeState(paused = false)
+            stateInitialized = true
+        }
+        setRemoteControlServiceLease(true)
+        refreshNotification()
+        return true
+    }
+
     private fun restoreRoute(route: RouteState): Boolean {
+        if (route.startAtEpochMs != null) return restoreScheduled(route)
         if (route.lats.size < 2 || route.lats.size != route.lngs.size) return false
         val waypoints = route.lats.indices.map { LatLng(route.lats[it], route.lngs[it]) }
         if (validateRouteRequest(waypoints, route.speedKmh) != null) return false
@@ -342,6 +485,11 @@ class LocationService : Service() {
         if (::remoteControlPoller.isInitialized) {
             remoteControlPoller.setServiceActive(active)
         }
+    }
+
+    private fun updateScheduledRuntimePaused(paused: Boolean) {
+        val current = _runtimeState.value as? RuntimeState.Scheduled ?: return
+        _runtimeState.value = current.copy(paused = paused)
     }
 
     private fun updateRouteRuntimePaused(paused: Boolean) {
@@ -415,11 +563,13 @@ class LocationService : Service() {
         routeJob = null
         paused = false
         activeRoute = null
+        activeScheduled = null
     }
 
     // Called under providerWriteLock so a live settings update cannot race route completion.
     private fun finishRoute(last: LatLng) {
         activeRoute = null
+        activeScheduled = null
         currentMode = MockState.Mode.Single
         _runtimeState.value = RuntimeState.Single(last)
         startSingleKeepAlive(last)
@@ -429,38 +579,12 @@ class LocationService : Service() {
 
     private fun currentStateSnapshot(): MockState? =
         synchronized(providerWriteLock) {
-            when (val runtime = _runtimeState.value) {
-                RuntimeState.Idle -> null
-                is RuntimeState.Single ->
-                    MockState(
-                        mode = MockState.Mode.Single,
-                        single = SinglePointState(runtime.point.lat, runtime.point.lng),
-                    )
-                is RuntimeState.Route ->
-                    MockState(
-                        mode = MockState.Mode.Route,
-                        route =
-                            activeRoute?.toRouteState()
-                                ?: throw CancellationException("Route snapshot is no longer available."),
-                    )
-            }
+            mockStateSnapshot(_runtimeState.value, activeRoute, activeScheduled)
         }
 
-    private fun startSingleKeepAlive(point: LatLng) {
-        stopSingleKeepAlive()
-        singleKeepAliveJob =
-            scope.launch {
-                while (isActive) {
-                    pushLocation(point)
-                    delay(LOCATION_SERVICE_TICK_MILLIS)
-                }
-            }
-    }
+    private fun startSingleKeepAlive(point: LatLng) = singleKeepAlive.start(point)
 
-    private fun stopSingleKeepAlive() {
-        singleKeepAliveJob?.cancel()
-        singleKeepAliveJob = null
-    }
+    private fun stopSingleKeepAlive() = singleKeepAlive.stop()
 
     private fun pushLocation(point: LatLng) {
         synchronized(providerWriteLock) {
@@ -573,74 +697,14 @@ class LocationService : Service() {
         )
     }
 
-    private fun buildNotification(): Notification {
-        val launchIntent = Intent(this, MainActivity::class.java)
-        val contentPI =
-            PendingIntent.getActivity(
-                this,
-                REQ_CONTENT,
-                launchIntent,
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-            )
-        val text =
-            when {
-                currentMode == MockState.Mode.Idle -> getString(R.string.location_service_text_ready)
-                currentMode == MockState.Mode.Single -> getString(R.string.location_service_text_single)
-                paused -> getString(R.string.location_service_text_route_paused)
-                else -> getString(R.string.location_service_text_route_playing)
-            }
-        val builder =
-            NotificationCompat
-                .Builder(this, CHANNEL_ID)
-                .setContentTitle(getString(R.string.location_service_title))
-                .setContentText(text)
-                .setSmallIcon(R.drawable.ic_launcher_monochrome)
-                .setContentIntent(contentPI)
-                .setOngoing(true)
-
-        if (currentMode == MockState.Mode.Route) {
-            if (paused) {
-                builder.addAction(
-                    0,
-                    getString(R.string.location_service_action_resume),
-                    servicePI(REQ_RESUME, ACTION_RESUME),
-                )
-            } else {
-                builder.addAction(
-                    0,
-                    getString(R.string.location_service_action_pause),
-                    servicePI(REQ_PAUSE, ACTION_PAUSE),
-                )
-            }
-        }
-        if (currentMode != MockState.Mode.Idle) {
-            builder.addAction(
-                0,
-                getString(R.string.location_service_action_stop),
-                servicePI(REQ_STOP, ACTION_STOP),
-            )
-        }
-        return builder.build()
-    }
-
-    private fun servicePI(
-        requestCode: Int,
-        action: String,
-    ): PendingIntent {
-        val intent = Intent(this, LocationService::class.java).apply { this.action = action }
-        return PendingIntent.getService(
-            this,
-            requestCode,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-    }
+    private fun buildNotification(): Notification = LocationServiceNotification(this, CHANNEL_ID).build(currentMode, paused, activeScheduled)
 
     companion object {
         const val ACTION_START = "dev.narumi.kestrel.action.START"
         const val ACTION_STOP = "dev.narumi.kestrel.action.STOP"
         const val ACTION_SET_LOCATION = "dev.narumi.kestrel.action.SET_LOCATION"
         const val ACTION_START_ROUTE = "dev.narumi.kestrel.action.START_ROUTE"
+        const val ACTION_START_SCHEDULED = "dev.narumi.kestrel.action.START_SCHEDULED"
         const val ACTION_UPDATE_ROUTE_SETTINGS = "dev.narumi.kestrel.action.UPDATE_ROUTE_SETTINGS"
         const val ACTION_PAUSE = "dev.narumi.kestrel.action.PAUSE"
         const val ACTION_RESUME = "dev.narumi.kestrel.action.RESUME"
@@ -652,13 +716,10 @@ class LocationService : Service() {
         const val EXTRA_MODE = "route_mode"
         const val EXTRA_REQUEST_ID = "request_id"
         const val EXTRA_PLAYBACK_ID = "playback_id"
+        const val EXTRA_PLAN_TOKEN = "plan_token"
         private const val CHANNEL_ID = "kestrel_location"
         private const val NOTIFICATION_ID = 1001
         private const val TAG = "LocationService"
-        private const val REQ_CONTENT = 0
-        private const val REQ_PAUSE = 1
-        private const val REQ_RESUME = 2
-        private const val REQ_STOP = 3
 
         private val _currentMock = MutableStateFlow<LatLng?>(null)
         val currentMock: StateFlow<LatLng?> = _currentMock.asStateFlow()
@@ -677,140 +738,43 @@ class LocationService : Service() {
          */
         val runtimeState: StateFlow<RuntimeState> = _runtimeState.asStateFlow()
 
-        fun start(context: Context) {
-            sendIntent(context, ACTION_START, foreground = true)
-        }
+        private val commands =
+            LocationServiceCommands(
+                report = { _operationResults.tryEmit(it) },
+                hasActiveMock = { _runtimeState.value != RuntimeState.Idle },
+            )
+
+        fun start(context: Context) = commands.start(context)
 
         fun setLocation(
             context: Context,
             point: LatLng,
-        ): String =
-            dispatchOperation(
-                context = context,
-                action = ACTION_SET_LOCATION,
-                foreground = true,
-            ) {
-                putExtra(EXTRA_LAT, point.lat)
-                putExtra(EXTRA_LNG, point.lng)
-            }
+        ): String = commands.setLocation(context, point)
 
         fun startRoute(
             context: Context,
             waypoints: List<LatLng>,
             speedKmh: Double,
             mode: MovementEngine.Mode = MovementEngine.Mode.Once,
-        ): String {
-            val requestError = validateRouteRequest(waypoints, speedKmh)
-            val requestId = UUID.randomUUID().toString()
-            if (requestError != null) {
-                _operationResults.tryEmit(
-                    LocationOperationResult(
-                        requestId = requestId,
-                        action = LocationOperationAction.StartRoute,
-                        succeeded = false,
-                        message = requestError,
-                    ),
-                )
-                return requestId
-            }
-            val lats = DoubleArray(waypoints.size) { waypoints[it].lat }
-            val lngs = DoubleArray(waypoints.size) { waypoints[it].lng }
-            return dispatchOperation(
-                context = context,
-                action = ACTION_START_ROUTE,
-                foreground = true,
-                requestId = requestId,
-            ) {
-                putExtra(EXTRA_LATS, lats)
-                putExtra(EXTRA_LNGS, lngs)
-                putExtra(EXTRA_SPEED_KMH, speedKmh)
-                putExtra(EXTRA_MODE, mode.name)
-            }
-        }
+        ): String = commands.startRoute(context, waypoints, speedKmh, mode)
+
+        /** Arms a scheduled plan using an in-process handoff for large routes. */
+        fun startScheduled(
+            context: Context,
+            plan: PlaybackPlan,
+        ): String = commands.startScheduled(context, plan)
 
         fun updateRouteSettings(
             context: Context,
             playbackId: String,
             speedKmh: Double? = null,
             mode: MovementEngine.Mode? = null,
-        ): String =
-            dispatchOperation(context, ACTION_UPDATE_ROUTE_SETTINGS, foreground = false) {
-                putExtra(EXTRA_PLAYBACK_ID, playbackId)
-                speedKmh?.let { putExtra(EXTRA_SPEED_KMH, it) }
-                mode?.let { putExtra(EXTRA_MODE, it.name) }
-            }
+        ): String = commands.updateRouteSettings(context, playbackId, speedKmh, mode)
 
-        fun pause(context: Context): String = dispatchOperation(context, ACTION_PAUSE, foreground = false)
+        fun pause(context: Context): String = commands.pause(context)
 
-        fun resume(context: Context): String = dispatchOperation(context, ACTION_RESUME, foreground = false)
+        fun resume(context: Context): String = commands.resume(context)
 
-        fun stop(context: Context): String = dispatchOperation(context, ACTION_STOP, foreground = false)
-
-        private fun sendIntent(
-            context: Context,
-            action: String,
-            foreground: Boolean,
-        ) {
-            val intent =
-                Intent(context, LocationService::class.java).apply {
-                    this.action = action
-                }
-            startCompat(context, intent, foreground)
-        }
-
-        private fun dispatchOperation(
-            context: Context,
-            action: String,
-            foreground: Boolean,
-            requestId: String = UUID.randomUUID().toString(),
-            configure: Intent.() -> Unit = {},
-        ): String {
-            val intent =
-                Intent(context, LocationService::class.java).apply {
-                    this.action = action
-                    putExtra(EXTRA_REQUEST_ID, requestId)
-                    configure()
-                }
-            runCatching { startCompat(context, intent, foreground) }
-                .onFailure { error ->
-                    val operationAction = action.toLocationOperationAction() ?: return@onFailure
-                    _operationResults.tryEmit(
-                        LocationOperationResult(
-                            requestId = requestId,
-                            action = operationAction,
-                            succeeded = false,
-                            message =
-                                mockOperationErrorMessage(
-                                    error,
-                                    previousMockActive = _runtimeState.value != RuntimeState.Idle,
-                                ),
-                        ),
-                    )
-                }
-            return requestId
-        }
-
-        private fun startCompat(
-            context: Context,
-            intent: Intent,
-            foreground: Boolean,
-        ) {
-            if (foreground && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-        }
+        fun stop(context: Context): String = commands.stop(context)
     }
 }
-
-private fun String?.toLocationOperationAction(): LocationOperationAction? =
-    when (this) {
-        LocationService.ACTION_SET_LOCATION -> LocationOperationAction.SetPoint
-        LocationService.ACTION_START_ROUTE -> LocationOperationAction.StartRoute
-        LocationService.ACTION_UPDATE_ROUTE_SETTINGS -> LocationOperationAction.UpdateRouteSettings
-        LocationService.ACTION_PAUSE -> LocationOperationAction.Pause
-        LocationService.ACTION_RESUME -> LocationOperationAction.Resume
-        LocationService.ACTION_STOP -> LocationOperationAction.Stop
-        else -> null
-    }

@@ -1,6 +1,6 @@
 # Scheduled Route Playback Plan
 
-Archive-provided design for scheduled route playback. This integration implements phases 1 and 2 only; later phases remain pending. GPX import is authorized for this fork by the user.
+Archive-provided design for scheduled route playback. This integration implements phases 1 through 3; later phases remain pending. GPX import is authorized for this fork by the user.
 
 ## Goal
 
@@ -52,12 +52,12 @@ Rules: start times are stored as UTC epoch. A start time in the past prompts "St
 
 ### Phase 3: Service and persistence
 
-- New `core/location/ScheduledPlaybackRunner.kt` with phases `Armed` (hold source, sleep until start), `Moving` (tick at `updateIntervalMs`, call `timeline.positionAt(clock.elapsed())`), `Arrived`.
-- New `core/location/LocationSink.kt`: interface wrapping `MockProviderManager` so the runner is testable without Android.
+- New `core/routeplan/ScheduledPlaybackRunner.kt` with phases `Armed` (hold source, sleep until start), `Moving` (tick at `updateIntervalMs`, call `timeline.positionAt(clock.elapsed())`), `Arrived`.
+- New `core/routeplan/LocationSink.kt`: interface wrapping `MockProviderManager` so the runner is testable without Android.
 - `LocationService.kt`: add `ACTION_START_SCHEDULED` and companion `startScheduled(...)`. Replace the running mock atomically (do not call `stop()` then start). Keep new logic out of this file (Detekt limits, already 816 lines).
 - `RuntimeState.kt`: add `Scheduled(plan, phase)`. Emit only on phase transitions.
-- `core/data/Preferences.kt`: add nullable defaulted fields to `RouteState`: `startAtEpochMs`, `updateIntervalMs`, `timesSeconds`, `sourceLat`, `sourceLng`, `pausedTotalMs`. Do not add a `MockState.Mode`. Write through `encodePreservingUnknown`.
-- `core/location/RouteProgressWriteCadence.kt`: revisit tick-count conversion if the interval is below 1 s.
+- `core/data/Preferences.kt`: add nullable defaulted fields to `RouteState`: `startAtEpochMs`, `updateIntervalMs`, `timesMs`, `sourceLat`, `sourceLng`, `speedSource`, `speedFactor`, `leadInSpeedKmh`, `pausedTotalMs`, `name`. Do not add a `MockState.Mode`. Write through `encodePreservingUnknown`.
+- `core/location/RouteProgressWriteCadence.kt`: ordinary routes retain their one-second tick; scheduled routes use the clock and plan interval directly, with persistence on state transitions rather than per-tick progress writes.
 - Restore: recompute position from the clock, not saved progress.
 
 ### Phase 4: UI and input
@@ -113,13 +113,13 @@ Gates: `just android-check`, `just android-lint`, `just android-test`.
 - [x] Fork created, green baseline, debug app ID suffix (verified in the environment handoff)
 - [x] `RouteTimeline`, `PlaybackClock`, great-circle interpolation with tests (integrated; Gradle JVM tests verified September 29, 2026)
 - [x] Importers (GeoJSON, CSV, coordinate list, GPX, router JSON, polyline) with fixtures (integrated; Gradle JVM tests verified September 29, 2026)
-- [ ] `ScheduledPlaybackRunner`, `LocationSink`, `RuntimeState.Scheduled`
-- [ ] `RouteState` schedule fields with forward-compatibility tests
-- [ ] Simulated-route tests in virtual time
+- [x] `ScheduledPlaybackRunner`, `LocationSink`, `RuntimeState.Scheduled` (integrated; Gradle JVM tests and debug build verified September 29, 2026)
+- [x] `RouteState` schedule fields with forward-compatibility tests (legacy decoding and unknown-field preservation tested)
+- [x] Simulated-route tests in virtual time (fake monotonic clock with real coroutine Job cancellation)
 - [ ] Share/open intents, picker, paste box
 - [ ] `SchedulePlanSheet`, countdown, notification
 - [ ] Pre-flight mock and notification permission checks
 - [ ] Emulator instrumented test
 - [ ] Real-device Doze and process-kill checks
-- [x] `just android-check`, `android-lint`, `android-test` pass for phases 1 and 2 (281 tests; debug build also passes)
+- [x] `just android-check`, `android-lint`, `android-test` pass for phases 1 through 3 (303 tests; debug build also passes)
 - [ ] Plan moved to `docs/plans/archived/` when done

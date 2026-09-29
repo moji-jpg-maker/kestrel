@@ -96,7 +96,7 @@ import java.util.Locale
 
 private const val OPERATION_TIMEOUT_MILLIS = 10_000L
 
-internal enum class RunState { Idle, Single, RoutePlaying, RoutePaused }
+internal enum class RunState { Idle, Single, ScheduledArmed, RoutePlaying, RoutePaused }
 
 internal enum class MapSetupStep { Permissions, MockLocationApp, Ready }
 
@@ -148,6 +148,18 @@ internal fun reconcileMapRender(
         RuntimeState.Idle -> MapRender(RunState.Idle, draftWaypoints, draftSpeedKmh, draftRouteMode)
         is RuntimeState.Single ->
             MapRender(RunState.Single, draftWaypoints, draftSpeedKmh, draftRouteMode)
+        is RuntimeState.Scheduled ->
+            MapRender(
+                runState =
+                    when {
+                        runtime.phase == dev.narumi.kestrel.core.location.SchedulePhase.Armed -> RunState.ScheduledArmed
+                        runtime.paused -> RunState.RoutePaused
+                        else -> RunState.RoutePlaying
+                    },
+                waypoints = listOfNotNull(runtime.plan.source) + runtime.plan.points.map { it.point },
+                speedKmh = runtime.speedKmh,
+                routeMode = MovementEngine.Mode.Once,
+            )
         is RuntimeState.Route ->
             MapRender(
                 runState = if (runtime.paused) RunState.RoutePaused else RunState.RoutePlaying,
@@ -369,7 +381,11 @@ fun MapScreen(
     val renderedRouteMode = render.routeMode
     // Settings callbacks target this rendered route, not a replacement received before the next frame.
     val activeRuntimeRoute = runtimeState as? RuntimeState.Route
-    val activeRoute = activeRuntimeRoute?.waypoints.orEmpty()
+    val activeRoute =
+        when (runtimeState) {
+            is RuntimeState.Route, is RuntimeState.Scheduled -> renderedWaypoints
+            else -> emptyList()
+        }
     val showPreview = workflowPhase == MapWorkflowPhase.Draft || workflowPhase == MapWorkflowPhase.ReplacementPreview
     val previewRoute = waypoints.takeIf { showPreview && it.size >= 2 }.orEmpty()
     val previewPoint = waypoints.singleOrNull().takeIf { showPreview }
@@ -641,12 +657,13 @@ fun MapScreen(
             feedbackIsError = operationError != null,
             onSpeedChange = { speedKmh = it },
             onModeChange = { routeMode = it },
+            liveRouteSettingsAllowed = activeRuntimeRoute != null,
             onPlayingSpeedChange = { updateActiveRouteSettings(speedKmh = it) },
             onPlayingModeChange = { updateActiveRouteSettings(mode = it) },
             onPrimary = {
                 when (runState) {
                     RunState.Idle -> if (waypoints.isEmpty()) showGenerateDialog = true else startDraftOperation()
-                    RunState.Single -> Unit
+                    RunState.Single, RunState.ScheduledArmed -> Unit
                     RunState.RoutePlaying ->
                         beginOperation(LocationService.pause(context), clearDraftOnSuccess = false)
                     RunState.RoutePaused ->
@@ -926,6 +943,7 @@ internal fun MapSheet(
     onGenerate: () -> Unit,
     onReplace: () -> Unit,
     onCancelPreview: () -> Unit,
+    liveRouteSettingsAllowed: Boolean = true,
     onPlayingSpeedChange: (Double) -> Unit = {},
     onPlayingModeChange: (MovementEngine.Mode) -> Unit = {},
 ) {
@@ -953,7 +971,7 @@ internal fun MapSheet(
             onPrimary = onPrimary,
             onStop = onStop,
         )
-        if (shouldShowLiveRouteSettings(runState)) {
+        if (liveRouteSettingsAllowed && shouldShowLiveRouteSettings(runState)) {
             LiveRouteSettingsCard(
                 speedKmh = speedKmh,
                 routeMode = routeMode,

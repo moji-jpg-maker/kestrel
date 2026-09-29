@@ -33,6 +33,8 @@ internal fun currentMockSummary(runtime: RuntimeState): String =
     when (runtime) {
         RuntimeState.Idle -> "No mock is active"
         is RuntimeState.Single -> "Point · %.5f, %.5f".format(runtime.point.lat, runtime.point.lng)
+        is RuntimeState.Scheduled ->
+            "Scheduled route · ${runtime.phase} · ${runtime.plan.points.size} waypoints"
         is RuntimeState.Route ->
             "Route · ${runtime.waypoints.size} waypoints · ${runtime.speedKmh.toWorkflowSpeed()} · " +
                 runtime.mode.toWorkflowLabel()
@@ -46,6 +48,7 @@ internal fun runtimeMatchesDraft(
 ): Boolean =
     when (runtime) {
         RuntimeState.Idle -> false
+        is RuntimeState.Scheduled -> false
         is RuntimeState.Single -> waypoints.singleOrNull() == runtime.point
         is RuntimeState.Route ->
             runtime.waypoints == waypoints &&

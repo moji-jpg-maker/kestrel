@@ -71,6 +71,8 @@ private fun StatusRow(
                     "Mocking single point",
                     mockNow?.let { "%.5f, %.5f".format(it.lat, it.lng) } ?: "—",
                 )
+            RunState.ScheduledArmed ->
+                Triple(KestrelIcons.RouteFilled, "Route scheduled", "Waiting for the scheduled start")
             RunState.RoutePlaying ->
                 Triple(
                     KestrelIcons.Play,
@@ -139,7 +141,7 @@ private fun PrimaryActionRow(
                 )
             }
         }
-        RunState.Single ->
+        RunState.Single, RunState.ScheduledArmed ->
             Button(
                 onClick = onStop,
                 enabled = !operationPending,
