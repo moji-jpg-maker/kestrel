@@ -31,12 +31,14 @@ internal fun MapPlaybackControls(
     operationPending: Boolean,
     onPrimary: () -> Unit,
     onStop: () -> Unit,
+    // Title and details to show instead of the plain route text, for a scheduled plan.
+    statusOverride: Pair<String, String>? = null,
 ) {
     Column(
         modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        StatusRow(runState, waypointCount, mockNow, speedKmh, routeMode)
+        StatusRow(runState, waypointCount, mockNow, speedKmh, routeMode, statusOverride)
         PrimaryActionRow(runState, draftWaypointCount, ready, operationPending, onPrimary, onStop)
     }
 }
@@ -48,8 +50,9 @@ private fun StatusRow(
     mockNow: LatLng?,
     speedKmh: Double,
     routeMode: MovementEngine.Mode,
+    statusOverride: Pair<String, String>? = null,
 ) {
-    val (statusIcon, title, subtitle) =
+    val (statusIcon, baseTitle, baseSubtitle) =
         when (runState) {
             RunState.Idle ->
                 Triple(
@@ -86,6 +89,8 @@ private fun StatusRow(
                     formatRouteStatusDetails(waypointCount, speedKmh, routeMode),
                 )
         }
+    val title = statusOverride?.first ?: baseTitle
+    val subtitle = statusOverride?.second ?: baseSubtitle
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),

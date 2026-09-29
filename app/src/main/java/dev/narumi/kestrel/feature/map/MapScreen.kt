@@ -3,6 +3,7 @@ package dev.narumi.kestrel.feature.map
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.compose.foundation.clickable
@@ -84,14 +85,21 @@ import dev.narumi.kestrel.core.location.RouteGenerator
 import dev.narumi.kestrel.core.location.RuntimeState
 import dev.narumi.kestrel.core.location.parseCoordInput
 import dev.narumi.kestrel.core.location.rememberCurrentLocation
+import dev.narumi.kestrel.core.routeplan.PlaybackPlan
+import dev.narumi.kestrel.core.routeplan.RouteFileReader
+import dev.narumi.kestrel.core.routeplan.ScheduleDraft
+import dev.narumi.kestrel.core.routeplan.routeimport.ImportOutcome
+import dev.narumi.kestrel.core.routeplan.routeimport.RouteImporter
 import dev.narumi.kestrel.ui.components.KestrelActionRow
 import dev.narumi.kestrel.ui.components.KestrelIcon
 import dev.narumi.kestrel.ui.components.KestrelIcons
 import dev.narumi.kestrel.ui.components.PersistedActionResult
 import dev.narumi.kestrel.ui.components.runPersistedAction
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 private const val OPERATION_TIMEOUT_MILLIS = 10_000L
@@ -129,6 +137,8 @@ internal data class MapRender(
     val waypoints: List<LatLng>,
     val speedKmh: Double,
     val routeMode: MovementEngine.Mode,
+    // A scheduled plan is pausable but its speed and mode are fixed by the plan.
+    val scheduled: Boolean = false,
 )
 
 /**
@@ -136,7 +146,7 @@ internal data class MapRender(
  *
  * - Idle / Single: use drafts. Single keeps the same "drafts editable while a single point is
  *   mocked" behavior the UI had before, with the actual mock dot coming from `currentMock`.
- * - Route: service is authoritative for waypoints / speed / mode; drafts are ignored.
+ * - Route / Scheduled: service is authoritative for waypoints / speed / mode; drafts are ignored.
  */
 internal fun reconcileMapRender(
     runtime: RuntimeState,
@@ -148,6 +158,13 @@ internal fun reconcileMapRender(
         RuntimeState.Idle -> MapRender(RunState.Idle, draftWaypoints, draftSpeedKmh, draftRouteMode)
         is RuntimeState.Single ->
             MapRender(RunState.Single, draftWaypoints, draftSpeedKmh, draftRouteMode)
+        is RuntimeState.Route ->
+            MapRender(
+                runState = if (runtime.paused) RunState.RoutePaused else RunState.RoutePlaying,
+                waypoints = runtime.waypoints,
+                speedKmh = runtime.speedKmh,
+                routeMode = runtime.mode,
+            )
         is RuntimeState.Scheduled ->
             MapRender(
                 runState =
@@ -156,16 +173,10 @@ internal fun reconcileMapRender(
                         runtime.paused -> RunState.RoutePaused
                         else -> RunState.RoutePlaying
                     },
-                waypoints = listOfNotNull(runtime.plan.source) + runtime.plan.points.map { it.point },
+                waypoints = scheduledRoutePoints(runtime),
                 speedKmh = runtime.speedKmh,
                 routeMode = MovementEngine.Mode.Once,
-            )
-        is RuntimeState.Route ->
-            MapRender(
-                runState = if (runtime.paused) RunState.RoutePaused else RunState.RoutePlaying,
-                waypoints = runtime.waypoints,
-                speedKmh = runtime.speedKmh,
-                routeMode = runtime.mode,
+                scheduled = true,
             )
     }
 
@@ -191,6 +202,7 @@ private val DraftWaypointsSaver: Saver<List<LatLng>, List<Double>> =
 private data class PendingLocationOperation(
     val requestId: String,
     val clearDraftOnSuccess: Boolean,
+    val clearScheduleOnSuccess: Boolean = false,
 )
 
 private enum class GoToFavoriteFilter { All, Points, Routes }
@@ -261,6 +273,8 @@ fun MapScreen(
     onFavoriteApplyConsumed: () -> Unit = {},
     pendingMapLinkPoint: LatLng? = null,
     onMapLinkPointConsumed: () -> Unit = {},
+    pendingRouteUri: Uri? = null,
+    onRouteUriConsumed: () -> Unit = {},
     onViewAllFavorites: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -308,6 +322,10 @@ fun MapScreen(
     var showReplaceConfirmation by remember { mutableStateOf(false) }
     var favoriteSaving by remember { mutableStateOf(false) }
     var favoriteError by remember { mutableStateOf<String?>(null) }
+    var showScheduleSheet by remember { mutableStateOf(false) }
+    var scheduleDraft by remember { mutableStateOf(ScheduleDraft()) }
+    var scheduleImporting by remember { mutableStateOf(false) }
+    var scheduleImportError by remember { mutableStateOf<String?>(null) }
 
     val myLocation by rememberCurrentLocation(permissionState.allPermissionsGranted)
 
@@ -321,7 +339,7 @@ fun MapScreen(
 
     LaunchedEffect(Unit) {
         if (startupResolved) return@LaunchedEffect
-        if (pendingFavoriteApply != null || pendingMapLinkPoint != null) {
+        if (pendingFavoriteApply != null || pendingMapLinkPoint != null || pendingRouteUri != null) {
             startupResolved = true
             return@LaunchedEffect
         }
@@ -382,12 +400,20 @@ fun MapScreen(
     // Settings callbacks target this rendered route, not a replacement received before the next frame.
     val activeRuntimeRoute = runtimeState as? RuntimeState.Route
     val activeRoute =
-        when (runtimeState) {
-            is RuntimeState.Route, is RuntimeState.Scheduled -> renderedWaypoints
-            else -> emptyList()
-        }
+        activeRuntimeRoute?.waypoints
+            ?: (runtimeState as? RuntimeState.Scheduled)?.let(::scheduledRoutePoints).orEmpty()
     val showPreview = workflowPhase == MapWorkflowPhase.Draft || workflowPhase == MapWorkflowPhase.ReplacementPreview
-    val previewRoute = waypoints.takeIf { showPreview && it.size >= 2 }.orEmpty()
+    // An imported route shows as a preview until it is scheduled or removed; a drafted route wins.
+    val previewRoute =
+        waypoints
+            .takeIf { showPreview && it.size >= 2 }
+            .orEmpty()
+            .ifEmpty {
+                scheduleDraft.route
+                    ?.points
+                    ?.map { it.point }
+                    .orEmpty()
+            }
     val previewPoint = waypoints.singleOrNull().takeIf { showPreview }
 
     LaunchedEffect(latestOperationResult, pendingLocationOperation) {
@@ -398,6 +424,7 @@ fun MapScreen(
             operationMessage = result.message
             operationError = null
             if (pending.clearDraftOnSuccess) waypoints = emptyList()
+            if (pending.clearScheduleOnSuccess) scheduleDraft = ScheduleDraft()
         } else {
             operationMessage = null
             operationError = result.message
@@ -452,6 +479,7 @@ fun MapScreen(
         )
     val scaffoldState = rememberBottomSheetScaffoldState(bottomSheetState = sheetState)
     val goToSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scheduleSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     fun applyPoint(point: LatLng) {
         // Choosing a target is a side-effect-free preview. Active playback keeps running until
@@ -491,6 +519,49 @@ fun MapScreen(
         beginOperation(requestId = requestId, clearDraftOnSuccess = true)
     }
 
+    fun applyImportOutcome(outcome: ImportOutcome) {
+        scheduleImporting = false
+        when (outcome) {
+            is ImportOutcome.Success -> {
+                scheduleDraft = scheduleDraft.withImportedRoute(outcome.route, System.currentTimeMillis())
+                scheduleImportError = null
+                outcome.route.points
+                    .firstOrNull()
+                    ?.let { cameraTarget = CameraSnapshot(it.point.lat, it.point.lng, 13.0) }
+            }
+            is ImportOutcome.Failure -> scheduleImportError = outcome.message
+        }
+        // An import always lands in the sheet as a preview; nothing starts until the user confirms.
+        showScheduleSheet = true
+    }
+
+    fun importScheduleUri(uri: Uri) {
+        scheduleImporting = true
+        scope.launch { applyImportOutcome(RouteFileReader.import(context, uri)) }
+    }
+
+    fun importScheduleText(text: String) {
+        scheduleImporting = true
+        scope.launch { applyImportOutcome(withContext(Dispatchers.Default) { RouteImporter.import(text) }) }
+    }
+
+    fun startScheduledPlan(plan: PlaybackPlan) {
+        if (!ready || pendingLocationOperation != null) return
+        beginOperation(
+            requestId = LocationService.startScheduled(context, plan),
+            clearDraftOnSuccess = false,
+        )
+        pendingLocationOperation = pendingLocationOperation?.copy(clearScheduleOnSuccess = true)
+        showScheduleSheet = false
+    }
+
+    LaunchedEffect(pendingRouteUri) {
+        pendingRouteUri?.let {
+            onRouteUriConsumed()
+            importScheduleUri(it)
+        }
+    }
+
     LaunchedEffect(pendingFavoriteApply) {
         pendingFavoriteApply?.let {
             applyItem(it)
@@ -528,6 +599,27 @@ fun MapScreen(
                 showGenerateDialog = false
             },
             onDismiss = { showGenerateDialog = false },
+        )
+    }
+
+    if (showScheduleSheet) {
+        SchedulePlanSheet(
+            sheetState = scheduleSheetState,
+            draft = scheduleDraft,
+            importing = scheduleImporting,
+            importError = scheduleImportError,
+            ready = ready,
+            replacesSummary = currentMockSummary(runtimeState).takeIf { runtimeState != RuntimeState.Idle },
+            operationPending = pendingLocationOperation != null,
+            onDraftChange = { scheduleDraft = it },
+            onPickFile = ::importScheduleUri,
+            onImportText = ::importScheduleText,
+            onClearRoute = {
+                scheduleDraft = ScheduleDraft()
+                scheduleImportError = null
+            },
+            onSchedule = ::startScheduledPlan,
+            onDismiss = { showScheduleSheet = false },
         )
     }
 
@@ -652,6 +744,10 @@ fun MapScreen(
             draftSpeedKmh = speedKmh,
             draftRouteMode = routeMode,
             currentSummary = currentMockSummary(runtimeState),
+            scheduledStatus =
+                (runtimeState as? RuntimeState.Scheduled)?.let { scheduledStatusTitle(it) to scheduledStatusDetails(it) },
+            hasScheduleRoute = scheduleDraft.route != null,
+            onOpenSchedule = { showScheduleSheet = true },
             operationPending = pendingLocationOperation != null,
             feedbackMessage = operationError ?: operationMessage,
             feedbackIsError = operationError != null,
@@ -946,6 +1042,9 @@ internal fun MapSheet(
     liveRouteSettingsAllowed: Boolean = true,
     onPlayingSpeedChange: (Double) -> Unit = {},
     onPlayingModeChange: (MovementEngine.Mode) -> Unit = {},
+    scheduledStatus: Pair<String, String>? = null,
+    hasScheduleRoute: Boolean = false,
+    onOpenSchedule: () -> Unit = {},
 ) {
     val runtimeActive = runState != RunState.Idle
     val statusWaypointCount = if (runtimeActive) waypointCount else draftWaypointCount
@@ -970,8 +1069,9 @@ internal fun MapSheet(
             operationPending = operationPending,
             onPrimary = onPrimary,
             onStop = onStop,
+            statusOverride = scheduledStatus,
         )
-        if (liveRouteSettingsAllowed && shouldShowLiveRouteSettings(runState)) {
+        if (liveRouteSettingsAllowed && shouldShowLiveRouteSettings(runState) && scheduledStatus == null) {
             LiveRouteSettingsCard(
                 speedKmh = speedKmh,
                 routeMode = routeMode,
@@ -981,6 +1081,7 @@ internal fun MapSheet(
             )
         }
         feedbackMessage?.let { MapFeedbackCard(message = it, isError = feedbackIsError) }
+        ScheduleEntryButton(onOpenSchedule, ready && !operationPending, hasScheduleRoute)
         if (!runtimeActive && draftWaypointCount > 0) {
             DraftPreviewActionsCard(
                 waypointCount = draftWaypointCount,
@@ -1020,6 +1121,17 @@ internal fun MapSheet(
             )
         }
         Spacer(Modifier.size(4.dp))
+    }
+}
+
+@Composable
+private fun ScheduleEntryButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    hasRoute: Boolean,
+) {
+    OutlinedButton(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+        Text(if (hasRoute) "Schedule imported route…" else "Import & schedule a route…")
     }
 }
 

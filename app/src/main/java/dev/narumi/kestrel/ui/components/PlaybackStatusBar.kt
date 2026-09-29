@@ -23,6 +23,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.narumi.kestrel.core.location.MovementEngine
 import dev.narumi.kestrel.core.location.RuntimeState
+import dev.narumi.kestrel.core.location.SchedulePhase
+import dev.narumi.kestrel.core.routeplan.formatScheduleStart
 
 internal data class PlaybackBarPresentation(
     val title: String,
@@ -41,22 +43,6 @@ internal fun playbackBarPresentation(runtime: RuntimeState): PlaybackBarPresenta
                 details = "%.5f, %.5f".format(runtime.point.lat, runtime.point.lng),
                 primaryAction = null,
             )
-        is RuntimeState.Scheduled ->
-            PlaybackBarPresentation(
-                title =
-                    when {
-                        runtime.phase == dev.narumi.kestrel.core.location.SchedulePhase.Armed -> "Route scheduled"
-                        runtime.paused -> "Route paused"
-                        else -> "Route playing"
-                    },
-                details = "${runtime.plan.points.size} waypoints · ${runtime.speedKmh.toBarSpeed()}",
-                primaryAction =
-                    when {
-                        runtime.phase == dev.narumi.kestrel.core.location.SchedulePhase.Armed -> null
-                        runtime.paused -> PlaybackBarAction.Resume
-                        else -> PlaybackBarAction.Pause
-                    },
-            )
         is RuntimeState.Route ->
             PlaybackBarPresentation(
                 title = if (runtime.paused) "Route paused" else "Route playing",
@@ -64,6 +50,29 @@ internal fun playbackBarPresentation(runtime: RuntimeState): PlaybackBarPresenta
                     "${runtime.waypoints.size} waypoints · ${runtime.speedKmh.toBarSpeed()} · " +
                         runtime.mode.toBarLabel(),
                 primaryAction = if (runtime.paused) PlaybackBarAction.Resume else PlaybackBarAction.Pause,
+            )
+        is RuntimeState.Scheduled ->
+            PlaybackBarPresentation(
+                title =
+                    when {
+                        runtime.phase == SchedulePhase.Armed && runtime.paused -> "Scheduled route paused"
+                        runtime.phase == SchedulePhase.Armed -> "Route scheduled"
+                        runtime.paused -> "Route paused"
+                        else -> "Route playing"
+                    },
+                details =
+                    if (runtime.phase == SchedulePhase.Armed) {
+                        "Starts ${formatScheduleStart(runtime.plan.startAtEpochMs, System.currentTimeMillis())} · " +
+                            "${runtime.plan.points.size} points"
+                    } else {
+                        "${runtime.plan.points.size} points · ${runtime.speedKmh.toBarSpeed()}"
+                    },
+                primaryAction =
+                    when {
+                        runtime.phase == SchedulePhase.Armed -> null
+                        runtime.paused -> PlaybackBarAction.Resume
+                        else -> PlaybackBarAction.Pause
+                    },
             )
     }
 

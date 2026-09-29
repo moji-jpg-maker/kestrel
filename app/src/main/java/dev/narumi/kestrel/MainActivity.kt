@@ -1,6 +1,7 @@
 package dev.narumi.kestrel
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -28,6 +29,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.PreviewScreenSizes
 import androidx.compose.ui.unit.dp
+import androidx.core.content.IntentCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -55,6 +57,7 @@ private const val OPERATION_TIMEOUT_MILLIS = 10_000L
 class MainActivity : ComponentActivity() {
     private var pendingMapLinkPoint by mutableStateOf<LatLng?>(null)
     private var pendingOidcCallback by mutableStateOf<String?>(null)
+    private var pendingRouteUri by mutableStateOf<Uri?>(null)
     private var skipCloudSyncOnForeground by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -66,9 +69,11 @@ class MainActivity : ComponentActivity() {
                 KestrelApp(
                     pendingMapLinkPoint = pendingMapLinkPoint,
                     pendingOidcCallback = pendingOidcCallback,
+                    pendingRouteUri = pendingRouteUri,
                     skipCloudSyncOnForeground = skipCloudSyncOnForeground,
                     onMapLinkPointConsumed = { pendingMapLinkPoint = null },
                     onOidcCallbackConsumed = ::consumeOidcCallbackIntent,
+                    onRouteUriConsumed = ::consumeRouteIntent,
                 )
             }
         }
@@ -82,12 +87,45 @@ class MainActivity : ComponentActivity() {
 
     private fun consumeMainIntent(intent: Intent?) {
         skipCloudSyncOnForeground = intent?.getBooleanExtra(EXTRA_SKIP_CLOUD_SYNC_ON_FOREGROUND, false) == true
+        val routeUri = routeUriFrom(intent)
         val viewedUri = intent?.dataString.takeIf { intent?.action == Intent.ACTION_VIEW }
-        if (isOidcCallbackUri(viewedUri)) {
+        if (routeUri != null) {
+            // A shared or opened route file. It is only imported into the schedule sheet as a preview.
+            pendingMapLinkPoint = null
+            pendingRouteUri = routeUri
+        } else if (isOidcCallbackUri(viewedUri)) {
             pendingMapLinkPoint = null
             pendingOidcCallback = viewedUri
         } else {
             consumeMapLinkIntent(intent)
+        }
+    }
+
+    private fun routeUriFrom(intent: Intent?): Uri? {
+        if (intent == null) return null
+        val type = intent.type ?: return null
+        if (type !in ROUTE_MIME_TYPES) return null
+        val uri =
+            when (intent.action) {
+                Intent.ACTION_VIEW -> intent.data
+                Intent.ACTION_SEND -> IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+                else -> null
+            }
+        return uri?.takeIf { it.scheme == "content" }
+    }
+
+    private fun consumeRouteIntent() {
+        pendingRouteUri = null
+        // Drop the route from the Intent so recreating the activity does not import it a second time.
+        intent?.let {
+            setIntent(
+                Intent(it).apply {
+                    action = null
+                    data = null
+                    type = null
+                    removeExtra(Intent.EXTRA_STREAM)
+                },
+            )
         }
     }
 
@@ -115,6 +153,9 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_SKIP_CLOUD_SYNC_ON_FOREGROUND = "dev.narumi.kestrel.SKIP_CLOUD_SYNC_ON_FOREGROUND"
+
+        /** Route file types the manifest accepts. Deliberately no blanket `application/json`. */
+        private val ROUTE_MIME_TYPES = setOf("application/gpx+xml", "application/geo+json", "text/csv")
     }
 }
 
@@ -124,9 +165,11 @@ class MainActivity : ComponentActivity() {
 fun KestrelApp(
     pendingMapLinkPoint: LatLng? = null,
     pendingOidcCallback: String? = null,
+    pendingRouteUri: Uri? = null,
     skipCloudSyncOnForeground: Boolean = false,
     onMapLinkPointConsumed: () -> Unit = {},
     onOidcCallbackConsumed: (String) -> Unit = {},
+    onRouteUriConsumed: () -> Unit = {},
 ) {
     var currentDestination by rememberSaveable { mutableStateOf(AppDestinations.HOME) }
     var pendingFavoriteApply by remember { mutableStateOf<LibraryItemWithContent?>(null) }
@@ -161,6 +204,12 @@ fun KestrelApp(
 
     LaunchedEffect(pendingMapLinkPoint) {
         if (pendingMapLinkPoint != null) {
+            currentDestination = AppDestinations.HOME
+        }
+    }
+
+    LaunchedEffect(pendingRouteUri) {
+        if (pendingRouteUri != null) {
             currentDestination = AppDestinations.HOME
         }
     }
@@ -231,9 +280,11 @@ fun KestrelApp(
                     pendingFavoriteApply = pendingFavoriteApply,
                     pendingMapLinkPoint = pendingMapLinkPoint,
                     pendingOidcCallback = pendingOidcCallback,
+                    pendingRouteUri = pendingRouteUri,
                     onFavoriteApplyConsumed = { pendingFavoriteApply = null },
                     onMapLinkPointConsumed = onMapLinkPointConsumed,
                     onOidcCallbackConsumed = onOidcCallbackConsumed,
+                    onRouteUriConsumed = onRouteUriConsumed,
                     onApplyFavorite = { favorite ->
                         pendingFavoriteApply = favorite
                         currentDestination = AppDestinations.HOME
@@ -279,9 +330,11 @@ private fun AppDestinationContent(
     pendingFavoriteApply: LibraryItemWithContent?,
     pendingMapLinkPoint: LatLng?,
     pendingOidcCallback: String?,
+    pendingRouteUri: Uri?,
     onFavoriteApplyConsumed: () -> Unit,
     onMapLinkPointConsumed: () -> Unit,
     onOidcCallbackConsumed: (String) -> Unit,
+    onRouteUriConsumed: () -> Unit,
     onApplyFavorite: (LibraryItemWithContent) -> Unit,
     onShowMap: () -> Unit,
     onShowFavorites: () -> Unit,
@@ -295,6 +348,8 @@ private fun AppDestinationContent(
                 onFavoriteApplyConsumed = onFavoriteApplyConsumed,
                 pendingMapLinkPoint = pendingMapLinkPoint,
                 onMapLinkPointConsumed = onMapLinkPointConsumed,
+                pendingRouteUri = pendingRouteUri,
+                onRouteUriConsumed = onRouteUriConsumed,
                 onViewAllFavorites = onShowFavorites,
             )
         AppDestinations.FAVORITES ->

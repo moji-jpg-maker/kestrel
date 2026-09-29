@@ -116,8 +116,9 @@ Gates: `just android-check`, `just android-lint`, `just android-test`.
 - [x] `ScheduledPlaybackRunner`, `LocationSink`, `RuntimeState.Scheduled` (integrated; Gradle JVM tests and debug build verified September 29, 2026)
 - [x] `RouteState` schedule fields with forward-compatibility tests (legacy decoding and unknown-field preservation tested)
 - [x] Simulated-route tests in virtual time (fake monotonic clock with real coroutine Job cancellation)
-- [ ] Share/open intents, picker, paste box
-- [ ] `SchedulePlanSheet`, countdown, notification
+- [x] Share/open intents, picker, paste box (Phase 4 import integrated September 29, 2026)
+- [x] `SchedulePlanSheet`, status bar, notification countdown (Phase 4 UI integrated; notification countdown was already in the service)
+- [ ] Localize the new inline schedule UI text in `strings.xml`; preserve imported draft across process death if required
 - [ ] Pre-flight mock and notification permission checks
 - [ ] Emulator instrumented test
 - [ ] Real-device Doze and process-kill checks

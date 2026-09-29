@@ -81,6 +81,27 @@
 
                 <data android:mimeType="text/plain" />
             </intent-filter>
+            <!-- Route files shared or opened from other apps. Narrow on purpose: no blanket application/json. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="content" />
+                <data android:mimeType="application/gpx+xml" />
+                <data android:mimeType="application/geo+json" />
+                <data android:mimeType="text/csv" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="application/gpx+xml" />
+                <data android:mimeType="application/geo+json" />
+                <data android:mimeType="text/csv" />
+            </intent-filter>
         </activity>
 
         <service
