@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.getSystemService
 import dev.narumi.kestrel.R
 import dev.narumi.kestrel.core.cloud.RemoteControlPoller
@@ -222,6 +223,7 @@ class LocationService : Service() {
         return START_STICKY
     }
 
+    @Suppress("ThrowsCount")
     private fun startScheduledAction(intent: Intent): Int {
         val plan =
             ScheduledPlanHandoff.take(intent.getStringExtra(EXTRA_PLAN_TOKEN))
@@ -236,9 +238,19 @@ class LocationService : Service() {
         }
         val active = newActiveScheduled(plan, intent.getStringExtra(EXTRA_REQUEST_ID), pausedTotalMs = 0L)
 
-        // Fail now rather than at the start time, possibly hours later, if mock location is not allowed.
-        if (!mockProvider.isMockAllowed()) {
-            throw MockNotAllowedException("Kestrel is not selected as the mock location app in Developer options")
+        // Fail now rather than at the start time, possibly hours later. This runs after the foreground
+        // start, which Android requires promptly; a failure here still stops the service if idle.
+        when (
+            schedulePreflight(
+                mockAllowed = mockProvider::isMockAllowed,
+                notificationsEnabled = { NotificationManagerCompat.from(this).areNotificationsEnabled() },
+            )
+        ) {
+            SchedulePreflightFailure.MockNotAllowed ->
+                throw MockNotAllowedException("Kestrel is not selected as the mock location app in Developer options")
+            // IllegalArgumentException is the type whose message reaches the user unchanged.
+            SchedulePreflightFailure.NotificationsDisabled -> throw IllegalArgumentException(SCHEDULE_NOTIFICATIONS_DISABLED_MESSAGE)
+            null -> Unit
         }
         // Prove that the provider accepts the source point before cancelling any running mock.
         synchronized(providerWriteLock) {

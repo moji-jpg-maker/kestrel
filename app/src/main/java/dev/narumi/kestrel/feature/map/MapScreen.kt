@@ -1,3 +1,5 @@
+@file:Suppress("TooManyFunctions")
+
 package dev.narumi.kestrel.feature.map
 
 import android.Manifest
@@ -56,15 +58,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.MultiplePermissionsState
+import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import dev.narumi.kestrel.R
 import dev.narumi.kestrel.core.data.CameraSnapshot
 import dev.narumi.kestrel.core.data.FavoritesSortMode
 import dev.narumi.kestrel.core.data.KestrelPrefs
@@ -90,6 +96,7 @@ import dev.narumi.kestrel.core.routeplan.RouteFileReader
 import dev.narumi.kestrel.core.routeplan.ScheduleDraft
 import dev.narumi.kestrel.core.routeplan.routeimport.ImportOutcome
 import dev.narumi.kestrel.core.routeplan.routeimport.RouteImporter
+import dev.narumi.kestrel.core.routeplan.scheduledStatusTitle
 import dev.narumi.kestrel.ui.components.KestrelActionRow
 import dev.narumi.kestrel.ui.components.KestrelIcon
 import dev.narumi.kestrel.ui.components.KestrelIcons
@@ -319,11 +326,16 @@ fun MapScreen(
     var pendingLocationOperation by remember { mutableStateOf<PendingLocationOperation?>(null) }
     var operationMessage by remember { mutableStateOf<String?>(null) }
     var operationError by remember { mutableStateOf<String?>(null) }
+    // A failed schedule keeps the sheet open and shows its reason there, next to the form to fix.
+    var scheduleOperationError by remember { mutableStateOf<String?>(null) }
     var showReplaceConfirmation by remember { mutableStateOf(false) }
     var favoriteSaving by remember { mutableStateOf(false) }
     var favoriteError by remember { mutableStateOf<String?>(null) }
-    var showScheduleSheet by remember { mutableStateOf(false) }
-    var scheduleDraft by remember { mutableStateOf(ScheduleDraft()) }
+    // The schedule draft lives in a ViewModel so an imported route survives rotation and tab switches.
+    // The importing flag and error stay local because their coroutine does not outlive the composition.
+    val scheduleModel: ScheduleUiModel = viewModel()
+    var showScheduleSheet by scheduleModel::sheetVisible
+    var scheduleDraft by scheduleModel::draft
     var scheduleImporting by remember { mutableStateOf(false) }
     var scheduleImportError by remember { mutableStateOf<String?>(null) }
 
@@ -384,7 +396,20 @@ fun MapScreen(
     }
 
     val setupStep = mapSetupStep(permissionState.allPermissionsGranted, mockAllowed)
+    val notificationPermissionGranted =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            permissionState.permissions
+                .firstOrNull { it.permission == Manifest.permission.POST_NOTIFICATIONS }
+                ?.status
+                ?.isGranted == true
     val ready = setupStep == MapSetupStep.Ready
+
+    fun openDeveloperOptions() {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }
     // Defer the per-tick value read to the map and sheet lambdas so route playback does not
     // recompose this entire screen every second.
     val currentMockState = LocationService.currentMock.collectAsStateWithLifecycle()
@@ -404,16 +429,21 @@ fun MapScreen(
             ?: (runtimeState as? RuntimeState.Scheduled)?.let(::scheduledRoutePoints).orEmpty()
     val showPreview = workflowPhase == MapWorkflowPhase.Draft || workflowPhase == MapWorkflowPhase.ReplacementPreview
     // An imported route shows as a preview until it is scheduled or removed; a drafted route wins.
+    // While a route is playing or scheduled, only that route is drawn.
+    val importedPreview =
+        if (runtimeState is RuntimeState.Route || runtimeState is RuntimeState.Scheduled) {
+            emptyList()
+        } else {
+            scheduleDraft.route
+                ?.points
+                ?.map { it.point }
+                .orEmpty()
+        }
     val previewRoute =
         waypoints
             .takeIf { showPreview && it.size >= 2 }
             .orEmpty()
-            .ifEmpty {
-                scheduleDraft.route
-                    ?.points
-                    ?.map { it.point }
-                    .orEmpty()
-            }
+            .ifEmpty { importedPreview }
     val previewPoint = waypoints.singleOrNull().takeIf { showPreview }
 
     LaunchedEffect(latestOperationResult, pendingLocationOperation) {
@@ -424,12 +454,21 @@ fun MapScreen(
             operationMessage = result.message
             operationError = null
             if (pending.clearDraftOnSuccess) waypoints = emptyList()
-            if (pending.clearScheduleOnSuccess) scheduleDraft = ScheduleDraft()
+            if (pending.clearScheduleOnSuccess) {
+                scheduleDraft = ScheduleDraft()
+                showScheduleSheet = false
+            }
         } else {
             operationMessage = null
             operationError = result.message
+            if (pending.clearScheduleOnSuccess) scheduleOperationError = result.message
         }
         pendingLocationOperation = null
+    }
+
+    // A stale schedule error must not greet the next time the sheet opens.
+    LaunchedEffect(showScheduleSheet) {
+        if (showScheduleSheet) scheduleOperationError = null
     }
 
     LaunchedEffect(pendingLocationOperation?.requestId) {
@@ -444,8 +483,10 @@ fun MapScreen(
                 operationError = null
                 waypoints = emptyList()
             } else {
+                val timeoutMessage = "Kestrel did not confirm the change. Check the current playback state and try again."
                 operationMessage = null
-                operationError = "Kestrel did not confirm the change. Check the current playback state and try again."
+                operationError = timeoutMessage
+                if (pendingLocationOperation?.clearScheduleOnSuccess == true) scheduleOperationError = timeoutMessage
             }
             pendingLocationOperation = null
         }
@@ -547,12 +588,13 @@ fun MapScreen(
 
     fun startScheduledPlan(plan: PlaybackPlan) {
         if (!ready || pendingLocationOperation != null) return
+        scheduleOperationError = null
         beginOperation(
             requestId = LocationService.startScheduled(context, plan),
             clearDraftOnSuccess = false,
         )
+        // The sheet stays open until the service confirms; success closes it, failure explains itself in it.
         pendingLocationOperation = pendingLocationOperation?.copy(clearScheduleOnSuccess = true)
-        showScheduleSheet = false
     }
 
     LaunchedEffect(pendingRouteUri) {
@@ -608,9 +650,14 @@ fun MapScreen(
             draft = scheduleDraft,
             importing = scheduleImporting,
             importError = scheduleImportError,
-            ready = ready,
+            setupStep = setupStep,
+            notificationPermissionGranted = notificationPermissionGranted,
+            onAllowPermissions = { permissionState.launchMultiplePermissionRequest() },
+            onOpenDeveloperOptions = ::openDeveloperOptions,
+            onRefreshMockCheck = { mockAllowed = mockProvider.isMockAllowed() },
             replacesSummary = currentMockSummary(runtimeState).takeIf { runtimeState != RuntimeState.Idle },
             operationPending = pendingLocationOperation != null,
+            serviceError = scheduleOperationError,
             onDraftChange = { scheduleDraft = it },
             onPickFile = ::importScheduleUri,
             onImportText = ::importScheduleText,
@@ -800,12 +847,7 @@ fun MapScreen(
                     scope.launch { prefs.setLastCamera(snap) }
                 }
             },
-            onOpenDeveloperOptions = {
-                context.startActivity(
-                    Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-            },
+            onOpenDeveloperOptions = ::openDeveloperOptions,
             onRefreshMockCheck = { mockAllowed = mockProvider.isMockAllowed() },
             onChooseTarget = { showGoToSheet = true },
             onCenterOnMe = {
@@ -1081,7 +1123,8 @@ internal fun MapSheet(
             )
         }
         feedbackMessage?.let { MapFeedbackCard(message = it, isError = feedbackIsError) }
-        ScheduleEntryButton(onOpenSchedule, ready && !operationPending, hasScheduleRoute)
+        // Importing and configuring a plan never touches system location, so it does not wait for setup.
+        ScheduleEntryButton(onOpenSchedule, !operationPending, hasScheduleRoute)
         if (!runtimeActive && draftWaypointCount > 0) {
             DraftPreviewActionsCard(
                 waypointCount = draftWaypointCount,
@@ -1131,7 +1174,7 @@ private fun ScheduleEntryButton(
     hasRoute: Boolean,
 ) {
     OutlinedButton(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-        Text(if (hasRoute) "Schedule imported route…" else "Import & schedule a route…")
+        Text(stringResource(if (hasRoute) R.string.schedule_entry_open else R.string.schedule_entry_import))
     }
 }
 
@@ -1173,6 +1216,25 @@ internal fun ChipChoice(
     )
 }
 
+internal fun setupPromptTitle(setupStep: MapSetupStep): String? =
+    when (setupStep) {
+        MapSetupStep.Permissions -> "Permission needed"
+        MapSetupStep.MockLocationApp -> "Select Kestrel for mock location"
+        MapSetupStep.Ready -> null
+    }
+
+internal fun setupPromptMessage(setupStep: MapSetupStep): String? =
+    when (setupStep) {
+        MapSetupStep.Permissions ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                "Allow location and notifications so mock GPS can run."
+            } else {
+                "Allow location so mock GPS can run."
+            }
+        MapSetupStep.MockLocationApp -> "Open developer options and choose Kestrel as the mock location app."
+        MapSetupStep.Ready -> null
+    }
+
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 internal fun StatusBanner(
@@ -1182,23 +1244,8 @@ internal fun StatusBanner(
     onOpenDeveloperOptions: () -> Unit,
     onRefreshMockCheck: () -> Unit,
 ) {
-    val title =
-        when (setupStep) {
-            MapSetupStep.Permissions -> "Permission needed"
-            MapSetupStep.MockLocationApp -> "Select Kestrel for mock location"
-            MapSetupStep.Ready -> return
-        }
-    val message =
-        when (setupStep) {
-            MapSetupStep.Permissions ->
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    "Allow location and notifications so mock GPS can run."
-                } else {
-                    "Allow location so mock GPS can run."
-                }
-            MapSetupStep.MockLocationApp -> "Open developer options and choose Kestrel as the mock location app."
-            MapSetupStep.Ready -> return
-        }
+    val title = setupPromptTitle(setupStep) ?: return
+    val message = setupPromptMessage(setupStep) ?: return
     SetupPromptCard(
         setupStep = setupStep,
         title = title,

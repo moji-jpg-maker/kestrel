@@ -11,5 +11,52 @@
     <string name="location_service_action_pause">Pause</string>
     <string name="location_service_action_resume">Resume</string>
     <string name="location_service_action_stop">Stop</string>
+    <string name="schedule_title">Schedule a route</string>
+    <string name="schedule_intro">Kestrel plays the route back at the start time. Nothing starts until you confirm below.</string>
+    <string name="schedule_entry_import">Import &amp; schedule a route…</string>
+    <string name="schedule_entry_open">Schedule imported route…</string>
+    <string name="schedule_replaces_current">Scheduling replaces the current mock: %1$s</string>
+    <string name="schedule_action_start_now">Start now</string>
+    <string name="schedule_action_schedule">Schedule</string>
+    <string name="schedule_action_join">Join route</string>
+    <string name="schedule_route_empty">Import a GPX, GeoJSON, CSV or JSON route, or paste coordinates.</string>
+    <string name="schedule_route_default_name">Imported route</string>
+    <plurals name="schedule_route_points">
+        <item quantity="one">%1$d point</item>
+        <item quantity="other">%1$d points</item>
+    </plurals>
+    <string name="schedule_route_has_timestamps">" · has timestamps"</string>
+    <string name="schedule_choose_file">Choose file…</string>
+    <string name="schedule_remove_route">Remove route</string>
+    <string name="schedule_paste_label">Or paste route text</string>
+    <string name="schedule_importing">Importing…</string>
+    <string name="schedule_import_pasted">Import pasted text</string>
+    <string name="schedule_section_start">Start</string>
+    <string name="schedule_start_now">Start now</string>
+    <string name="schedule_pick_time">Pick a time</string>
+    <string name="schedule_past_start">That start time has already passed. Start from the beginning now, or join the route where it would be by now.</string>
+    <string name="schedule_join_current">Join at current position</string>
+    <string name="schedule_join_active">Kestrel will join the route where it would be by now.</string>
+    <string name="schedule_ok">OK</string>
+    <string name="schedule_cancel">Cancel</string>
+    <string name="schedule_section_source">Source (optional)</string>
+    <string name="schedule_source_label">Latitude, longitude</string>
+    <string name="schedule_source_hint">Where the device sits before the start. Empty means the route\'s first point.</string>
+    <string name="schedule_section_speed">Speed</string>
+    <string name="schedule_speed_constant">Constant</string>
+    <string name="schedule_speed_timestamps">File timestamps</string>
+    <string name="schedule_speed_scaled">Timestamps × factor</string>
+    <string name="schedule_speed_kmh">Speed (km/h)</string>
+    <string name="schedule_speed_timestamps_hint">The file\'s own timing is replayed as recorded.</string>
+    <string name="schedule_speed_factor">Factor (2 = twice as fast)</string>
+    <string name="schedule_speed_lead_in">Speed from source to route (km/h)</string>
+    <string name="schedule_section_interval">Update interval</string>
+    <string name="schedule_interval_range">Use %1$d–%2$d ms.</string>
+    <string name="schedule_section_summary">Summary</string>
+    <string name="schedule_summary_starts_now">Starts now</string>
+    <string name="schedule_summary_starts">Starts %1$s</string>
+    <string name="schedule_summary_joins">Started %1$s · joins in progress</string>
+    <string name="schedule_summary_line">%1$s · %2$s · avg %3$s</string>
+    <string name="schedule_step_warning">Each update moves the device about %1$d m at this speed and interval. Choose a shorter interval for smoother movement.</string>
     <string name="asset_statements" translatable="false"><![CDATA[[{"relation":["delegate_permission/common.get_login_creds"],"target":{"namespace":"web","site":"https://kestrel.narumi.dev"}}]]]></string>
 </resources>

@@ -81,14 +81,6 @@ private fun MovementEngine.Mode.toWorkflowLabel(): String =
 /** The points a scheduled plan travels through, including the source it starts from. */
 internal fun scheduledRoutePoints(runtime: RuntimeState.Scheduled): List<LatLng> = listOfNotNull(runtime.plan.source) + runtime.plan.points.map { it.point }
 
-internal fun scheduledStatusTitle(runtime: RuntimeState.Scheduled): String =
-    when {
-        runtime.phase == SchedulePhase.Armed && runtime.paused -> "Scheduled route paused"
-        runtime.phase == SchedulePhase.Armed -> "Route scheduled"
-        runtime.paused -> "Route paused"
-        else -> "Route playing"
-    }
-
 /** "Starts 18:30 · Ride · 20 km/h" — [nowMs] decides whether the start shows a date. */
 internal fun scheduledStatusDetails(
     runtime: RuntimeState.Scheduled,

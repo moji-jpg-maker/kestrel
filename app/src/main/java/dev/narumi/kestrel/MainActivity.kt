@@ -154,8 +154,21 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_SKIP_CLOUD_SYNC_ON_FOREGROUND = "dev.narumi.kestrel.SKIP_CLOUD_SYNC_ON_FOREGROUND"
 
-        /** Route file types the manifest accepts. Deliberately no blanket `application/json`. */
-        private val ROUTE_MIME_TYPES = setOf("application/gpx+xml", "application/geo+json", "text/csv")
+        /**
+         * Route file types the manifest accepts; keep in sync with its `VIEW` and `SEND` filters. GPX is
+         * often labelled as XML or a generic binary type, and the import sniffs the content anyway.
+         * Deliberately no blanket `application/json`.
+         */
+        private val ROUTE_MIME_TYPES =
+            setOf(
+                "application/gpx+xml",
+                "application/gpx",
+                "application/geo+json",
+                "text/csv",
+                "application/xml",
+                "text/xml",
+                "application/octet-stream",
+            )
     }
 }
 

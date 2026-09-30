@@ -64,4 +64,41 @@ class MapPresentationRulesTest {
             ),
         )
     }
+
+    @Test
+    fun setupPrompt_hasTextForEveryStepThatBlocksAndNoneWhenReady() {
+        assertEquals(null, setupPromptTitle(MapSetupStep.Ready))
+        assertEquals(null, setupPromptMessage(MapSetupStep.Ready))
+        assertTrue(setupPromptTitle(MapSetupStep.Permissions).orEmpty().isNotBlank())
+        assertTrue(setupPromptMessage(MapSetupStep.Permissions).orEmpty().contains("location"))
+        assertTrue(setupPromptMessage(MapSetupStep.MockLocationApp).orEmpty().contains("developer options"))
+    }
+
+    @Test
+    fun scheduleSetupError_prioritizesDisabledNotifications() {
+        val message =
+            scheduleSetupError(
+                setupStep = MapSetupStep.Permissions,
+                notificationPermissionGranted = false,
+            )
+
+        assertTrue(message.orEmpty().contains("Notifications are turned off"))
+    }
+
+    @Test
+    fun scheduleSetupError_explainsMockSelectionAndAllowsReadyState() {
+        assertTrue(
+            scheduleSetupError(
+                setupStep = MapSetupStep.MockLocationApp,
+                notificationPermissionGranted = true,
+            ).orEmpty().contains("Developer options"),
+        )
+        assertEquals(
+            null,
+            scheduleSetupError(
+                setupStep = MapSetupStep.Ready,
+                notificationPermissionGranted = true,
+            ),
+        )
+    }
 }

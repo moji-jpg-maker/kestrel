@@ -62,17 +62,21 @@ Rules: start times are stored as UTC epoch. A start time in the past prompts "St
 
 ### Phase 4: UI and input
 
-- `MainActivity.kt` and `AndroidManifest.xml`: narrow `VIEW`/`SEND` filters for `application/gpx+xml`, `application/geo+json`, `text/csv`. Read `content://` URIs with `ContentResolver`. No blanket `application/json` filter.
+- `MainActivity.kt` and `AndroidManifest.xml`: `VIEW`/`SEND` filters for `application/gpx+xml`, `application/gpx`, `application/geo+json`, `text/csv`, plus `application/xml`, `text/xml` and `application/octet-stream`, because apps often label GPX that way; the importer sniffs the content and a non-route file only shows an import error. Read `content://` URIs with `ContentResolver`. No blanket `application/json` filter.
 - SAF picker via `ActivityResultContracts.OpenDocument`, plus a paste box.
-- New `feature/map/SchedulePlanSheet.kt`: import, Material 3 date/time pickers, "Start now", speed source, interval, summary. Collapsed section inside the route panel.
-- Modify `MapScreen.kt`, `MapWorkspace.kt`, `RouteSettingsControls.kt`, `MapWorkflowPresentation.kt` (`currentMockSummary`, `runtimeMatchesDraft`), `ui/components/PlaybackStatusBar.kt`, and `LocationService.buildNotification` (countdown "Starts in 12:04", progress, "Arrived").
-- Add strings to `res/values/strings.xml`.
+- New `feature/map/SchedulePlanSheet.kt`: import, Material 3 date/time pickers, "Start now", speed source, interval, summary. Implemented as a modal bottom sheet opened from a button in the map sheet (`MapSheet`), not as a collapsed section, so `MapWorkspace.kt` and `RouteSettingsControls.kt` stay unchanged. A start time in the past shows the "Start now" / "Join at current position" choice (join keeps the original start, so the clock is already mid-route). The summary warns when one update moves more than about 50 m. Plan and timeline building runs off the main thread. An imported preview is not drawn over a route that is playing or scheduled. The draft lives in a ViewModel: it survives rotation but not process death (a route can exceed the saved-state size limit, so the user re-imports).
+- Modify `MapScreen.kt`, `MapWorkflowPresentation.kt` (`currentMockSummary`, `runtimeMatchesDraft`), `ui/components/PlaybackStatusBar.kt`, and `LocationService.buildNotification` (countdown "Starts in 12:04", progress, "Arrived"; already present in the service). `MapWorkspace.kt` and `RouteSettingsControls.kt` are not needed because the schedule UI is a sheet. New `feature/map/ScheduleUiModel.kt` holds the draft. `scheduledStatusTitle` lives in `core/routeplan/ScheduleFormat.kt` so the sheet and the status bar share one title.
+- Add strings to `res/values/strings.xml`. The sheet and the schedule button use string resources. Pure presentation helpers (`scheduledStatusTitle`, `playbackBarPresentation`, `currentMockSummary`) and core validation and import messages stay English literals, like the existing Route strings beside them.
 - Imports always land in Preview. Nothing starts without the user confirming.
+- Importing, previewing and configuring a plan never touch system location, so the entry button and the sheet do not wait for setup (same split as drafting a route versus starting it). When setup is incomplete the sheet shows the map's setup prompt (`SetupPromptCard`: Allow permissions, Open developer options, Recheck). The final action remains available so an explicit attempt shows the notification- or mock-specific error inline without starting the service. Nothing in the sheet dismisses it when readiness changes.
 
 ### Phase 5: Permissions and mock-location checks
 
 - Existing permissions cover it: `ACCESS_FINE_LOCATION`, `FOREGROUND_SERVICE_LOCATION`, `POST_NOTIFICATIONS`, `ACCESS_MOCK_LOCATION` (user selects Kestrel under Developer options).
-- At scheduling time call `MockProviderManager.isMockAllowed()` and check notification permission. Fail early, not at the start time.
+- At scheduling time `LocationService.startScheduledAction` runs `schedulePreflight` (new `core/location/SchedulePreflight.kt`): `MockProviderManager.isMockAllowed()`, then `NotificationManagerCompat.areNotificationsEnabled()`. Fail early, not at the start time. The checks run after the foreground start, which Android requires promptly; a failure leaves any running mock untouched and stops the service if idle. The service check is explicit for notifications because a denied `POST_NOTIFICATIONS` does not stop a location foreground service from starting, only hides its notification. The sheet checks known prerequisites on the final action first, so an explicit attempt shows its own inline fix without starting the service. The service check is the fallback for what the UI cannot see: on API 29 to 32 notifications are not a permission, so `ready` can be true while they are off, and prerequisites can also change between the gate and the press. On API 33+ revoking notifications revokes `POST_NOTIFICATIONS`, which the sheet catches first.
+- `MockNotAllowedException` maps to an actionable message in `mockOperationErrorMessage` (it used to fall through to the generic "try again" text). A failed schedule keeps the schedule sheet open and shows the reason there.
+- Device validation (HONOR X7d, API 35, September 30, 2026): turning off the visible system notification switch restarted the app process (`11410` to `14578`) but the active point mock and `SET_LOCATION` service survived. After re-importing a two-point draft, pressing Start now kept the sheet open, showed the notification-specific inline error, and left the process, service action and start id unchanged. With Kestrel deselected as the mock app, pressing Start now kept the sheet open with the Developer-options error and started no service. UI dumps immediately before both imports confirmed the exact two-line value `25.03658,121.56540` / `25.04658,121.57540`; later garbage in the still-focused field came from ADB gestures being intercepted after import and did not affect the imported route. The field also rendered `Or paste route text` without duplication or overlap. Still to verify: the notification-specific **service fallback** on an API 29 to 32 device or emulator, where notifications can be disabled without a runtime permission change.
+- Not covered, by design: mock access or permissions revoked while a plan is armed, or a killed app. `failScheduled` reports those at the start time.
 - Arm as a foreground service when the plan is scheduled. Verify background foreground-service start behaviour on real devices.
 - Offer a link to battery optimization settings as guidance.
 - Keep upstream's boundary: no claims of bypassing detection or Play Integrity, no jitter.
@@ -85,6 +89,7 @@ JVM unit tests in `app/src/test/`:
 - `RouteTimelineTest`: before, at, mid, at waypoint, at end, after end. Constant, timestamps, scaled timestamps, lead-in, long great-circle segment.
 - `PlaybackClockTest`: pause/resume, wall-clock jump, start in the past.
 - Extend `RouteStateSerializationTest` (old payloads, unknown fields, round trip) and `MapWorkflowPresentationTest`.
+- `ScheduleDraftTest`: past start with and without Join, Join withdrawn on a new start, Join on a finished route, large-step flag, factor and lead-in edits not blocking the speed hint, ready plan carries its timeline. `SchedulePreflightTest`: order and short-circuit of the checks. `LocationOperationTest`: the `MockNotAllowedException` message.
 
 Simulated route tests: add `kotlinx-coroutines-test`. Run `ScheduledPlaybackRunner` against a fake `LocationSink` in virtual time. Assert nothing moves before the start, sample count equals duration / interval, inter-sample speed matches target, and the last sample equals the destination.
 
@@ -100,11 +105,11 @@ Gates: `just android-check`, `just android-lint`, `just android-test`.
 |---|---|
 | Doze, OEM task killers | Foreground service armed at scheduling. Position is a function of the clock. Optional partial wake lock during `Moving` only. Test on real devices. |
 | Time sync, time zones, DST | UTC epoch plus monotonic anchor. Show local time. |
-| Start in the past | Explicit "Start now" or "Join" choice. |
+| Start in the past | Explicit "Start now" or "Join at current position" choice; a Join on an already finished route is rejected. |
 | Timestamps vs speed conflict | User picks the source. Show resulting duration. |
-| Long pauses in GPX | Optional compress pauses longer than N minutes. |
+| Long pauses in GPX | Optional compress pauses longer than N minutes. Not implemented. |
 | Large or hostile files | Size and point caps, DOCTYPE disabled, optional simplification, parse off the main thread. |
-| Big jumps at high speed and long interval | Warn when speed x interval exceeds about 50 m per sample. |
+| Big jumps at high speed and long interval | Warn when speed x interval exceeds about 50 m per sample (`MAX_COMFORTABLE_STEP_METERS`; average speed stands in for timestamp plans). |
 | Fused provider override | Turn off Google Location Accuracy (README) and show a hint when updates do not arrive. |
 | `LocationService` growth | Logic in the new runner, timeline and importer classes. |
 
@@ -118,9 +123,15 @@ Gates: `just android-check`, `just android-lint`, `just android-test`.
 - [x] Simulated-route tests in virtual time (fake monotonic clock with real coroutine Job cancellation)
 - [x] Share/open intents, picker, paste box (Phase 4 import integrated September 29, 2026)
 - [x] `SchedulePlanSheet`, status bar, notification countdown (Phase 4 UI integrated; notification countdown was already in the service)
-- [ ] Localize the new inline schedule UI text in `strings.xml`; preserve imported draft across process death if required
-- [ ] Pre-flight mock and notification permission checks
+- [x] Schedule sheet text in `strings.xml`; draft kept across rotation by `ScheduleUiModel` (process death re-imports by design)
+- [x] Past-start Join choice and large-step warning
+- [x] Broader share/open MIME types (`application/xml`, `text/xml`, `application/octet-stream`, `application/gpx`)
+- [x] Pre-flight mock and notification checks at schedule time (`schedulePreflight`, unit-tested); explicit attempts with notifications disabled or the mock app unselected keep the sheet open with the specific reason; both UI-known paths verified on a device
+- [x] Schedule entry and sheet usable before setup is complete; the sheet shows the setup prompt in place
+- [x] Running point mock survives the API 35 notification-disabled rejection with the service action/start id unchanged (device)
+- [ ] Notification-specific service fallback verified on an API 29 to 32 device or emulator
 - [ ] Emulator instrumented test
 - [ ] Real-device Doze and process-kill checks
 - [x] `just android-check`, `android-lint`, `android-test` pass for phases 1 through 3 (303 tests; debug build also passes)
+- [x] `just android-check`, `android-lint`, `android-test` for the Phase 4 review fixes (join, step warning, ViewModel, strings, MIME types, pre-flight, sheet error); debug build also passes
 - [ ] Plan moved to `docs/plans/archived/` when done

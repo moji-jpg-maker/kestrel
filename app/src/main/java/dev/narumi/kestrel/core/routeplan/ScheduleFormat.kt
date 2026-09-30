@@ -1,11 +1,22 @@
 package dev.narumi.kestrel.core.routeplan
 
+import dev.narumi.kestrel.core.location.RuntimeState
+import dev.narumi.kestrel.core.location.SchedulePhase
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
 import kotlin.math.roundToLong
+
+/** Headline for a scheduled plan, shared by the map sheet and the playback status bar. */
+fun scheduledStatusTitle(runtime: RuntimeState.Scheduled): String =
+    when {
+        runtime.phase == SchedulePhase.Armed && runtime.paused -> "Scheduled route paused"
+        runtime.phase == SchedulePhase.Armed -> "Route scheduled"
+        runtime.paused -> "Route paused"
+        else -> "Route playing"
+    }
 
 /** "18:30", or "Wed, 30 Sep, 18:30" when [epochMs] is not on the same local day as [nowMs]. */
 fun formatScheduleStart(

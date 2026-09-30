@@ -55,6 +55,10 @@ internal fun mockOperationErrorMessage(
     previousMockActive: Boolean,
 ): String =
     when (error) {
+        // Without this branch the exception falls through to the generic "try again" text, which is
+        // wrong for a setting that stays wrong until the user changes it.
+        is MockNotAllowedException ->
+            "Kestrel is not selected as the mock location app. Choose it under Developer options, then try again."
         is SecurityException -> "Kestrel could not use mock location. Recheck permissions and the selected mock-location app."
         is IllegalArgumentException -> error.message ?: "The mock-location request is invalid."
         else ->

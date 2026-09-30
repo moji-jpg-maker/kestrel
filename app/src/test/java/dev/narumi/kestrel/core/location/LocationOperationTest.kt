@@ -93,4 +93,12 @@ class LocationOperationTest {
                 .contains("No mock was started"),
         )
     }
+
+    @Test
+    fun mockNotAllowedExplainsHowToFixItInsteadOfSuggestingARetry() {
+        val message = mockOperationErrorMessage(MockNotAllowedException("internal detail"), previousMockActive = false)
+        assertTrue(message.contains("Developer options"))
+        assertTrue(!message.contains("internal detail"))
+        assertTrue(!message.contains("No mock was started"))
+    }
 }

@@ -25,6 +25,7 @@ import dev.narumi.kestrel.core.location.MovementEngine
 import dev.narumi.kestrel.core.location.RuntimeState
 import dev.narumi.kestrel.core.location.SchedulePhase
 import dev.narumi.kestrel.core.routeplan.formatScheduleStart
+import dev.narumi.kestrel.core.routeplan.scheduledStatusTitle
 
 internal data class PlaybackBarPresentation(
     val title: String,
@@ -53,13 +54,7 @@ internal fun playbackBarPresentation(runtime: RuntimeState): PlaybackBarPresenta
             )
         is RuntimeState.Scheduled ->
             PlaybackBarPresentation(
-                title =
-                    when {
-                        runtime.phase == SchedulePhase.Armed && runtime.paused -> "Scheduled route paused"
-                        runtime.phase == SchedulePhase.Armed -> "Route scheduled"
-                        runtime.paused -> "Route paused"
-                        else -> "Route playing"
-                    },
+                title = scheduledStatusTitle(runtime),
                 details =
                     if (runtime.phase == SchedulePhase.Armed) {
                         "Starts ${formatScheduleStart(runtime.plan.startAtEpochMs, System.currentTimeMillis())} · " +

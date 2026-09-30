@@ -145,4 +145,52 @@ class ScheduleDraftTest {
         val draft = ScheduleDraft().withImportedRoute(timed()).withSource(LatLng(52.0, 3.99))
         RouteTimeline(ready(buildPlaybackPlan(draft, now)))
     }
+
+    @Test
+    fun joiningAPastStartKeepsTheOriginalStartSoTheRouteIsAlreadyUnderway() {
+        val past = now - 120_000
+        val base = ScheduleDraft().withImportedRoute(plain()).withStart(past)
+        assertTrue(base.startIsPast(now))
+        assertEquals("The start time is in the past.", invalid(buildPlaybackPlan(base, now)))
+        assertEquals(past, ready(buildPlaybackPlan(base.withJoinInProgress(), now)).startAtEpochMs)
+    }
+
+    @Test
+    fun changingTheStartWithdrawsAJoin() {
+        val joined = ScheduleDraft().withImportedRoute(plain()).withStart(now - 120_000).withJoinInProgress()
+        assertTrue(joined.joinInProgress)
+        assertEquals(false, joined.withStart(now + 60_000).joinInProgress)
+        assertEquals(false, joined.withStart(null).joinInProgress)
+    }
+
+    @Test
+    fun joiningARouteThatAlreadyFinishedIsRejected() {
+        val draft = ScheduleDraft().withImportedRoute(plain()).withStart(now - 3_600_000).withJoinInProgress()
+        assertTrue(invalid(buildPlaybackPlan(draft, now)).contains("already be finished"))
+    }
+
+    @Test
+    fun aBigStepPerUpdateIsFlaggedButASmallOneIsNot() {
+        val base = ScheduleDraft().withImportedRoute(plain())
+        val fast = buildPlaybackPlan(base.withSpeedKmh(120.0).withUpdateIntervalMs(2_000), now) as PlanBuildResult.Ready
+        assertEquals(120.0 / 3.6 * 2.0, fast.largeStepMeters!!, 0.001)
+        assertNull((buildPlaybackPlan(base.withSpeedKmh(20.0).withUpdateIntervalMs(1_000), now) as PlanBuildResult.Ready).largeStepMeters)
+        assertNull((buildPlaybackPlan(base.withSpeedKmh(100.0).withUpdateIntervalMs(1_000), now) as PlanBuildResult.Ready).largeStepMeters)
+    }
+
+    @Test
+    fun editingTheFactorOrLeadInSpeedDoesNotBlockTheSpeedHint() {
+        val draft =
+            ScheduleDraft()
+                .withTimestampFactor(2.0)
+                .withLeadInSpeedKmh(15.0)
+                .withImportedRoute(plain(PlanHints(speedKmh = 30.0)))
+        assertEquals(30.0, draft.speedKmh, 0.0)
+    }
+
+    @Test
+    fun aReadyPlanCarriesItsTimeline() {
+        val result = buildPlaybackPlan(ScheduleDraft().withImportedRoute(plain()), now) as PlanBuildResult.Ready
+        assertTrue(result.timeline.durationSeconds > 0.0)
+    }
 }

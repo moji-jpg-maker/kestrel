@@ -7,6 +7,7 @@ import dev.narumi.kestrel.core.location.SchedulePhase
 import dev.narumi.kestrel.core.routeplan.PlaybackPlan
 import dev.narumi.kestrel.core.routeplan.SpeedSource
 import dev.narumi.kestrel.core.routeplan.TrackPoint
+import dev.narumi.kestrel.core.routeplan.scheduledStatusTitle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
